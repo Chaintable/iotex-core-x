@@ -188,6 +188,8 @@ func newParams(
 
 	if vmCfg, ok := protocol.GetVMConfigCtx(ctx); ok {
 		vmConfig = vmCfg
+	} else if logger := protocol.GetPipelineEVMLoggerCtx(ctx); logger != nil {
+		vmConfig.Tracer = logger
 	}
 	chainConfig, err := getChainConfig(g.Blockchain, blkCtx.BlockHeight, evmNetworkID, func(height uint64) (*time.Time, error) {
 		return blockHeightToTime(ctx, height)

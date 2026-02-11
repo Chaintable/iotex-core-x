@@ -89,6 +89,7 @@ type (
 		MintTimeout time.Duration `yaml:"-"`
 		// StuckThreshold is the duration to detect chain stuck
 		StuckThreshold time.Duration `yaml:"stuckThreshold"`
+		VMTraceConfig  string        `yaml:"VMTraceConfig"`
 	}
 )
 

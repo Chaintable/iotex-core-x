@@ -1,10 +1,9 @@
 module github.com/iotexproject/iotex-core/v2
 
-go 1.23.0
-
-toolchain go1.23.7
+go 1.24
 
 require (
+	github.com/Chaintable/pipeline v0.0.64-0.20260211023043-02531857cadd
 	github.com/agiledragon/gomonkey/v2 v2.13.0
 	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/cenkalti/backoff v2.2.1+incompatible
@@ -14,7 +13,7 @@ require (
 	github.com/erigontech/erigon v1.9.7-0.20250305121304-76181961ed24
 	github.com/erigontech/erigon-lib v1.0.0
 	github.com/ethereum-optimism/go-ethereum-hdwallet v0.1.3
-	github.com/ethereum/go-ethereum v1.10.26
+	github.com/ethereum/go-ethereum v1.13.15
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-resty/resty/v2 v2.15.3
@@ -24,7 +23,7 @@ require (
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
 	github.com/hashicorp/vault/api v1.1.0
 	github.com/holiman/billy v0.0.0-20230718173358-1c7e68d277a7
-	github.com/holiman/uint256 v1.2.4
+	github.com/holiman/uint256 v1.3.2
 	github.com/iotexproject/go-fsm v1.0.0
 	github.com/iotexproject/go-p2p v0.3.7
 	github.com/iotexproject/go-pkgs v0.1.16-0.20250813090621-fc1c4ebefcb4
@@ -63,11 +62,11 @@ require (
 	go.uber.org/mock v0.5.2
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.36.0
-	golang.org/x/net v0.37.0
+	golang.org/x/net v0.38.0
 	golang.org/x/sync v0.12.0
 	golang.org/x/text v0.23.0
 	golang.org/x/time v0.8.0
-	google.golang.org/genproto v0.0.0-20230306155012-7f2fa6fef1f4
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250115164207-1a7da9e5054f
 	google.golang.org/grpc v1.69.4
 	google.golang.org/protobuf v1.36.4
 	gopkg.in/yaml.v2 v2.4.0
@@ -96,12 +95,30 @@ require (
 	github.com/anacrolix/torrent v1.52.6-0.20231201115409-7ea994b6bbd8 // indirect
 	github.com/anacrolix/upnp v0.1.3-0.20220123035249-922794e51c96 // indirect
 	github.com/anacrolix/utp v0.1.0 // indirect
+	github.com/aws/aws-sdk-go-v2 v1.32.5 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.6 // indirect
+	github.com/aws/aws-sdk-go-v2/config v1.28.5 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.17.46 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.20 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.24 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.24 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.1 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.3.23 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.4.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.18.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.66.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.24.6 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.28.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.33.1 // indirect
+	github.com/aws/smithy-go v1.22.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/benbjohnson/immutable v0.4.1-0.20221220213129-8932b999621d // indirect
 	github.com/benesch/cgosymbolizer v0.0.0-20190515212042-bec6fe6e597b // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bits-and-blooms/bitset v1.12.0 // indirect
+	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8 // indirect
 	github.com/btcsuite/btcd v0.24.2 // indirect
@@ -112,10 +129,11 @@ require (
 	github.com/cockroachdb/redact v1.0.8 // indirect
 	github.com/cockroachdb/sentry-go v0.6.1-cockroachdb.2 // indirect
 	github.com/cockroachdb/tokenbucket v0.0.0-20230807174530-cc333fc44b06 // indirect
-	github.com/consensys/bavard v0.1.13 // indirect
+	github.com/consensys/bavard v0.1.27 // indirect
 	github.com/consensys/gnark-crypto v0.12.1 // indirect
 	github.com/containerd/cgroups v1.1.0 // indirect
 	github.com/containerd/cgroups/v3 v3.0.3 // indirect
+	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/crackcomm/go-gitignore v0.0.0-20241020182519-7843d2ba8fdf // indirect
 	github.com/crate-crypto/go-ipa v0.0.0-20231025140028-3c0104f4b233 // indirect
@@ -168,6 +186,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
 	github.com/pion/dtls/v2 v2.2.12 // indirect
 	github.com/pion/dtls/v3 v3.0.4 // indirect
@@ -199,6 +218,7 @@ require (
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/rs/dnscache v0.0.0-20211102005908-e0241e321417 // indirect
+	github.com/segmentio/kafka-go v0.4.47 // indirect
 	github.com/shirou/gopsutil/v4 v4.24.7 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
@@ -211,12 +231,16 @@ require (
 	github.com/valyala/fastjson v1.6.4 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/xsleonard/go-merkle v1.1.0 // indirect
+	go.etcd.io/etcd/api/v3 v3.5.10 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.5.10 // indirect
+	go.etcd.io/etcd/client/v3 v3.5.10 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.uber.org/dig v1.18.0 // indirect
 	go.uber.org/fx v1.23.0 // indirect
 	golang.org/x/mod v0.24.0 // indirect
 	golang.org/x/tools v0.31.0 // indirect
 	gonum.org/v1/gonum v0.15.1 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20241015192408-796eee8c2d53 // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.3.0 // indirect
 	modernc.org/libc v1.62.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
@@ -343,7 +367,7 @@ require (
 )
 
 //Note: add tag for go-ethereum before cutting hard-fork release
-replace github.com/ethereum/go-ethereum => github.com/iotexproject/go-ethereum v1.7.4-0.20250409041953-0320a600146e
+replace github.com/ethereum/go-ethereum => github.com/Chaintable/go-ethereum-iotex v0.0.0-20260210121649-5e2059cfbb3a
 
 replace golang.org/x/xerrors => golang.org/x/xerrors v0.0.0-20190212162355-a5947ffaace3
 
