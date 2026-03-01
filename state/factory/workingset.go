@@ -172,7 +172,7 @@ func (ws *workingSet) runAction(
 		}
 	}
 	defer func() {
-		if startedTxHook && hooks != nil && hooks.OnTxEnd != nil && err == nil && receipt != nil {
+		if startedTxHook && hooks != nil && hooks.OnTxEnd != nil {
 			hooks.OnTxEnd(blockchain.ConvertToGethReceipt(receipt), err)
 		}
 	}()
