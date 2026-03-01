@@ -17,9 +17,29 @@ import (
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
 )
 
+// LastGethBlockHash caches the geth RLP hash of the most recently converted block.
+// This enables a consistent geth hash chain where each block's ParentHash matches
+// the parent block's geth hash (used as S3 key). Without this, IoTeX native PrevHash
+// (GenesisHash for block 0, protobuf hash for others) would be used, causing
+// mismatches with S3-stored block keys.
+// Initialized from Kafka (LastPushedBlock) on restart, or computed on fresh start.
+var LastGethBlockHash common.Hash
+
 // ConvertToGethBlock converts an iotex block.Block to a geth types.Block
 func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
-	prevHash := blk.PrevHash()
+	// Determine parent geth hash for consistent hash chain in S3/Kafka pipeline.
+	// IoTeX native PrevHash differs from geth RLP hash for all blocks.
+	var parentHash common.Hash
+	if LastGethBlockHash != (common.Hash{}) {
+		parentHash = LastGethBlockHash
+	} else if blk.Height() == 1 {
+		// Fresh start: genesis geth hash not cached yet, compute it
+		parentHash = BuildGenesisGethBlock(g).Hash()
+	} else {
+		// Fallback: use IoTeX native hash (should not happen in normal operation)
+		prevHash := blk.PrevHash()
+		parentHash = common.BytesToHash(prevHash[:])
+	}
 	stateDigest := blk.DeltaStateDigest()
 	txRoot := blk.TxRoot()
 	receiptRoot := blk.ReceiptRoot()
@@ -28,7 +48,7 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		Time:        uint64(blk.Timestamp().Unix()),
 		GasUsed:     blk.GasUsed(),
 		GasLimit:    g.BlockGasLimitByHeight(blk.Height()),
-		ParentHash:  common.BytesToHash(prevHash[:]),
+		ParentHash:  parentHash,
 		Root:        common.BytesToHash(stateDigest[:]),
 		TxHash:      common.BytesToHash(txRoot[:]),
 		ReceiptHash: common.BytesToHash(receiptRoot[:]),
@@ -57,7 +77,9 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		}
 		txs = append(txs, ethTx)
 	}
-	return types.NewBlockWithHeader(header).WithBody(txs, nil)
+	gethBlock := types.NewBlockWithHeader(header).WithBody(txs, nil)
+	LastGethBlockHash = gethBlock.Hash()
+	return gethBlock
 }
 
 // ConvertToGethReceipt converts an iotex action.Receipt to a geth types.Receipt

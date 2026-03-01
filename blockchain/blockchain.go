@@ -268,6 +268,14 @@ func NewBlockchain(cfg Config, g genesis.Genesis, dao blockdao.BlockDAO, bbf Blo
 			chainConfig.ChainID = new(big.Int).SetUint64(uint64(cfg.EVMNetworkID))
 		}
 		chain.logger.OnBlockchainInit(chainConfig)
+		// Initialize geth hash cache for ConvertToGethBlock.
+		// On restart, LastPushedBlock() has the last block's geth hash from Kafka.
+		// On fresh start, this is nil and ConvertToGethBlock handles block 1 specially.
+		if tracer.NodeXPusher != nil {
+			if lastPushed := tracer.NodeXPusher.LastPushedBlock(); lastPushed != nil {
+				LastGethBlockHash = lastPushed.Hash
+			}
+		}
 	}
 
 	return chain
