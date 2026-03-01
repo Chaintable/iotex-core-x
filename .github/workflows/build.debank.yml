@@ -3,7 +3,7 @@ name: "Build new artifacts"
 on:
   pull_request:
     branches:
-      - "pipeline"
+      - "debank"
   workflow_dispatch:
 
 env:
