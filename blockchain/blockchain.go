@@ -698,9 +698,18 @@ func (bc *blockchain) pushBlockChange(blk *block.Block) {
 	if lastPushed == nil || lastPushed.BlockNumber > blk.Height() {
 		return
 	}
+	// OnGenesisBlock stores geth-style hash (rlpHash), but IoTeX blocks use
+	// native hash (protobuf SHA256). Align genesis to IoTeX native hash so
+	// the fast path (parentHash == hash) in getCommonAncestor can match.
+	lastCtx := *lastPushed
+	if lastCtx.BlockNumber == 0 {
+		genesisHash := block.GenesisHash()
+		lastCtx.Hash = common.Hash(genesisHash)
+		lastCtx.ParentHash = common.Hash(hash.ZeroHash256)
+	}
 	blkHash := blk.HashBlock()
 	prevHash := blk.PrevHash()
-	_, dropBlocks, newBlocks := bc.getCommonAncestor(*lastPushed, ptypes.BlockContext{
+	_, dropBlocks, newBlocks := bc.getCommonAncestor(lastCtx, ptypes.BlockContext{
 		BlockNumber: blk.Height(),
 		Hash:        common.Hash(blkHash),
 		ParentHash:  common.Hash(prevHash),
