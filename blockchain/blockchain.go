@@ -646,7 +646,13 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 		if err != nil {
 			log.L().Fatal("Failed to get header by hash", zap.String("hash", blockb.ParentHash.Hex()), zap.Error(err))
 		}
-		blkHash := headerb.HashBlock()
+		// Use dao.GetBlockHash instead of header.HashBlock() to stay consistent
+		// with IoTeX's hash system where GetBlockHash(0) = GenesisHash() (config hash),
+		// which differs from GenesisBlock().HashBlock() (header protobuf hash).
+		blkHash, err := bc.dao.GetBlockHash(headerb.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headerb.Height()), zap.Error(err))
+		}
 		prevHash := headerb.PrevHash()
 		blockb = ptypes.BlockContext{
 			BlockNumber: headerb.Height(),
@@ -661,11 +667,14 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 		if err != nil {
 			log.L().Fatal("Failed to get header by hash", zap.String("hash", blocka.ParentHash.Hex()), zap.Error(err))
 		}
-		blkHash := headera.HashBlock()
+		blkHashA, err := bc.dao.GetBlockHash(headera.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headera.Height()), zap.Error(err))
+		}
 		prevHash := headera.PrevHash()
 		blocka = ptypes.BlockContext{
 			BlockNumber: headera.Height(),
-			Hash:        common.Hash(blkHash),
+			Hash:        common.Hash(blkHashA),
 			ParentHash:  common.Hash(prevHash),
 			Timestamp:   uint64(headera.Timestamp().Unix()),
 		}
@@ -675,11 +684,14 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 		if err != nil {
 			log.L().Fatal("Failed to get header by hash", zap.String("hash", blockb.ParentHash.Hex()), zap.Error(err))
 		}
-		blkHash = headerb.HashBlock()
+		blkHashB, err := bc.dao.GetBlockHash(headerb.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headerb.Height()), zap.Error(err))
+		}
 		prevHash = headerb.PrevHash()
 		blockb = ptypes.BlockContext{
 			BlockNumber: headerb.Height(),
-			Hash:        common.Hash(blkHash),
+			Hash:        common.Hash(blkHashB),
 			ParentHash:  common.Hash(prevHash),
 			Timestamp:   uint64(headerb.Timestamp().Unix()),
 		}
@@ -698,16 +710,27 @@ func (bc *blockchain) pushBlockChange(blk *block.Block) {
 	if lastPushed == nil || lastPushed.BlockNumber > blk.Height() {
 		return
 	}
-	// OnGenesisBlock stores geth-style hash (rlpHash), but IoTeX blocks use
-	// native hash (protobuf SHA256). Align genesis to IoTeX native hash so
-	// the fast path (parentHash == hash) in getCommonAncestor can match.
+	// OnGenesisBlock stores geth-style hash (rlpHash), but IoTeX DAO uses
+	// GenesisHash() (config hash) as the canonical genesis identifier.
+	// Override to match dao.GetBlockHash(0) so the hash system is consistent
+	// across getCommonAncestor and PushBlockChangeNotification validation.
 	lastCtx := *lastPushed
 	if lastCtx.BlockNumber == 0 {
-		genesisHash := block.GenesisHash()
-		lastCtx.Hash = common.Hash(genesisHash)
+		daoGenesisHash := common.Hash(block.GenesisHash())
+		lastCtx.Hash = daoGenesisHash
 		lastCtx.ParentHash = common.Hash(hash.ZeroHash256)
+		// Also fix the pusher's internal LastBlockNotice so that
+		// PushBlockChangeNotification validation (LastPushedBlock().Hash == newBlocks[0].ParentHash) passes
+		if ln := tracer.NodeXPusher.LastBlockNotice; ln != nil && len(ln.NewBlocks) > 0 {
+			ln.NewBlocks[len(ln.NewBlocks)-1].Hash = daoGenesisHash
+		}
 	}
-	blkHash := blk.HashBlock()
+	// Use dao.GetBlockHash for consistency with IoTeX's hash system
+	blkHash, err := bc.dao.GetBlockHash(blk.Height())
+	if err != nil {
+		log.L().Error("pushBlockChange: failed to get block hash", zap.Uint64("height", blk.Height()), zap.Error(err))
+		return
+	}
 	prevHash := blk.PrevHash()
 	_, dropBlocks, newBlocks := bc.getCommonAncestor(lastCtx, ptypes.BlockContext{
 		BlockNumber: blk.Height(),
