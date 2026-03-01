@@ -261,6 +261,12 @@ func NewBlockchain(cfg Config, g genesis.Genesis, dao blockdao.BlockDAO, bbf Blo
 		if err != nil {
 			log.L().Panic("failed to create chain config for pipeline tracer.", zap.Error(err))
 		}
+		// NewChainConfig only sets ChainID after Iceland fork (height 12289321),
+		// but OnBlockchainInit is called with height=0, leaving ChainID nil.
+		// Pipeline tracer uses ChainID.String() for S3 key paths — nil produces "<nil>".
+		if chainConfig.ChainID == nil {
+			chainConfig.ChainID = new(big.Int).SetUint64(uint64(cfg.EVMNetworkID))
+		}
 		chain.logger.OnBlockchainInit(chainConfig)
 	}
 
