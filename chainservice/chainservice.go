@@ -85,6 +85,7 @@ type ChainService struct {
 	lastReceivedBlockHeight uint64
 	paused                  atomic.Bool
 	stuckThreshold          time.Duration
+	vmTraceConfig           string
 }
 
 // Start starts the server

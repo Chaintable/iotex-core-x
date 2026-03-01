@@ -14,7 +14,10 @@ import (
 
 	erigonstate "github.com/erigontech/erigon/core/state"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 	"github.com/iotexproject/go-pkgs/hash"
 	"github.com/iotexproject/iotex-proto/golang/iotextypes"
 	"github.com/pkg/errors"
@@ -30,6 +33,7 @@ import (
 	"github.com/iotexproject/iotex-core/v2/action/protocol/rewarding"
 	"github.com/iotexproject/iotex-core/v2/actpool"
 	"github.com/iotexproject/iotex-core/v2/actpool/actioniterator"
+	"github.com/iotexproject/iotex-core/v2/blockchain"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
 	"github.com/iotexproject/iotex-core/v2/db"
@@ -78,6 +82,7 @@ type (
 		finalized              bool
 		txValidator            *protocol.GenericValidator
 		receipts               []*action.Receipt
+		stateDiffCollector     *protocol.PipelineStateDiffCollector
 	}
 )
 
@@ -153,7 +158,25 @@ func withActionCtx(ctx context.Context, selp *action.SealedEnvelope) (context.Co
 func (ws *workingSet) runAction(
 	ctx context.Context,
 	selp *action.SealedEnvelope,
-) (*action.Receipt, error) {
+) (receipt *action.Receipt, err error) {
+	hooks := protocol.GetPipelineHooksCtx(ctx)
+	startedTxHook := false
+	if hooks != nil && hooks.OnTxStart != nil {
+		if ethTx, txErr := selp.ToEthTx(); txErr == nil {
+			var from common.Address
+			if sender := selp.SenderAddress(); sender != nil {
+				from = common.BytesToAddress(sender.Bytes())
+			}
+			hooks.OnTxStart(ethTx, from)
+			startedTxHook = true
+		}
+	}
+	defer func() {
+		if startedTxHook && hooks != nil && hooks.OnTxEnd != nil {
+			hooks.OnTxEnd(blockchain.ConvertToGethReceipt(receipt), err)
+		}
+	}()
+
 	actCtx := protocol.MustGetActionCtx(ctx)
 	if protocol.MustGetBlockCtx(ctx).GasLimit < actCtx.IntrinsicGas {
 		return nil, action.ErrGasLimit
@@ -187,7 +210,6 @@ func (ws *workingSet) runAction(
 		return nil, err
 	}
 	fCtx := protocol.MustGetFeatureCtx(ctx)
-	var receipt *action.Receipt
 	traceErr := evm.TraceStart(ctx, ws, selp.Envelope)
 	if traceErr != nil {
 		log.L().Error("failed to start tracing EVM execution", zap.Error(traceErr))
@@ -344,6 +366,26 @@ func (ws *workingSet) Commit(ctx context.Context, retention uint64) error {
 	if err := ws.store.Commit(ctx, retention); err != nil {
 		return err
 	}
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnCommit != nil {
+		collector := ws.stateDiffCollector
+		if collector == nil {
+			collector = protocol.GetStateDiffCollectorCtx(ctx)
+		}
+		if collector != nil {
+			digest, err := ws.digest()
+			if err != nil {
+				return err
+			}
+			root := common.BytesToHash(digest[:])
+			var originRoot common.Hash
+			if bcCtx, ok := protocol.GetBlockchainCtx(ctx); ok {
+				originRoot = common.BytesToHash(bcCtx.Tip.StateDigest[:])
+			}
+			hooks.OnCommit(originRoot, root,
+				collector.Destructs, collector.Accounts, nil,
+				collector.Storages, nil, collector.Codes)
+		}
+	}
 	if err := protocolCommit(ctx, ws); err != nil {
 		// TODO (zhi): wrap the error and eventually panic it in caller side
 		return err
@@ -412,6 +454,7 @@ func (ws *workingSet) PutState(s interface{}, opts ...protocol.StateOption) (uin
 			return ws.height, err
 		}
 	}
+	ws.collectAccountDiffOnPut(cfg, s)
 	return ws.height, nil
 }
 
@@ -435,7 +478,43 @@ func (ws *workingSet) DelState(opts ...protocol.StateOption) (uint64, error) {
 			return ws.height, err
 		}
 	}
+	ws.collectAccountDiffOnDelete(cfg)
 	return ws.height, nil
+}
+
+func (ws *workingSet) collectAccountDiffOnPut(cfg *protocol.StateConfig, s interface{}) {
+	collector := ws.stateDiffCollector
+	if collector == nil || cfg.Namespace != AccountKVNamespace || len(cfg.Key) != len(hash.Hash160{}) {
+		return
+	}
+	acc, ok := s.(*state.Account)
+	if !ok || acc == nil {
+		return
+	}
+	balance := acc.Balance
+	if balance == nil {
+		balance = big.NewInt(0)
+	}
+	addrHash := crypto.Keccak256Hash(cfg.Key)
+	gethAcc := types.StateAccount{
+		Nonce:    acc.PendingNonce(),
+		Balance:  uint256.MustFromBig(balance),
+		Root:     common.BytesToHash(acc.Root[:]),
+		CodeHash: common.CopyBytes(acc.CodeHash),
+	}
+	collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
+	delete(collector.Destructs, addrHash)
+}
+
+func (ws *workingSet) collectAccountDiffOnDelete(cfg *protocol.StateConfig) {
+	collector := ws.stateDiffCollector
+	if collector == nil || cfg.Namespace != AccountKVNamespace || len(cfg.Key) != len(hash.Hash160{}) {
+		return
+	}
+	addrHash := crypto.Keccak256Hash(cfg.Key)
+	collector.Destructs[addrHash] = struct{}{}
+	delete(collector.Accounts, addrHash)
+	delete(collector.Storages, addrHash)
 }
 
 // ReadView reads the view
@@ -534,6 +613,7 @@ func (ws *workingSet) checkNonceContinuity(ctx context.Context, accountNonceMap 
 }
 
 func (ws *workingSet) Process(ctx context.Context, actions []*action.SealedEnvelope) error {
+	ws.stateDiffCollector = protocol.GetStateDiffCollectorCtx(ctx)
 	if protocol.MustGetFeatureCtx(ctx).CorrectValidationOrder {
 		return ws.process(ctx, actions)
 	}
@@ -771,6 +851,7 @@ func (ws *workingSet) pickAndRunActions(
 	sign func(elp action.Envelope) (*action.SealedEnvelope, error),
 	allowedBlockGasResidue uint64,
 ) ([]*action.SealedEnvelope, error) {
+	ws.stateDiffCollector = protocol.GetStateDiffCollectorCtx(ctx)
 	err := ws.validate(ctx)
 	if err != nil {
 		return nil, err

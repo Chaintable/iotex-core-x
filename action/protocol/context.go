@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/iotexproject/go-pkgs/hash"
 	"github.com/iotexproject/iotex-address/address"
@@ -40,6 +42,7 @@ type (
 		Height        uint64
 		GasUsed       uint64
 		Hash          hash.Hash256
+		StateDigest   hash.Hash256
 		Timestamp     time.Time
 		BaseFee       *big.Int
 		BlobGasUsed   uint64
@@ -420,4 +423,61 @@ func WithVMConfigCtx(ctx context.Context, vmConfig vm.Config) context.Context {
 func GetVMConfigCtx(ctx context.Context) (vm.Config, bool) {
 	cfg, ok := ctx.Value(vmConfigContextKey{}).(vm.Config)
 	return cfg, ok
+}
+
+type pipelineHooksContextKey struct{}
+
+// WithPipelineHooksCtx adds pipeline tracing hooks to context
+func WithPipelineHooksCtx(ctx context.Context, hooks *tracing.Hooks) context.Context {
+	return context.WithValue(ctx, pipelineHooksContextKey{}, hooks)
+}
+
+// GetPipelineHooksCtx returns the pipeline hooks from context, nil if not set
+func GetPipelineHooksCtx(ctx context.Context) *tracing.Hooks {
+	hooks, _ := ctx.Value(pipelineHooksContextKey{}).(*tracing.Hooks)
+	return hooks
+}
+
+type pipelineEVMLoggerContextKey struct{}
+
+// WithPipelineEVMLoggerCtx adds pipeline EVM logger to context (separate from VMConfigCtx to avoid triggering TraceStart/TraceEnd)
+func WithPipelineEVMLoggerCtx(ctx context.Context, logger vm.EVMLogger) context.Context {
+	return context.WithValue(ctx, pipelineEVMLoggerContextKey{}, logger)
+}
+
+// GetPipelineEVMLoggerCtx returns the pipeline EVM logger from context, nil if not set
+func GetPipelineEVMLoggerCtx(ctx context.Context) vm.EVMLogger {
+	logger, _ := ctx.Value(pipelineEVMLoggerContextKey{}).(vm.EVMLogger)
+	return logger
+}
+
+// PipelineStateDiffCollector accumulates state diffs across transactions within a block
+type PipelineStateDiffCollector struct {
+	Destructs map[common.Hash]struct{}
+	Accounts  map[common.Hash][]byte
+	Storages  map[common.Hash]map[common.Hash][]byte
+	Codes     map[common.Hash][]byte
+}
+
+// NewPipelineStateDiffCollector creates a new collector with initialized maps
+func NewPipelineStateDiffCollector() *PipelineStateDiffCollector {
+	return &PipelineStateDiffCollector{
+		Destructs: make(map[common.Hash]struct{}),
+		Accounts:  make(map[common.Hash][]byte),
+		Storages:  make(map[common.Hash]map[common.Hash][]byte),
+		Codes:     make(map[common.Hash][]byte),
+	}
+}
+
+type stateDiffCollectorContextKey struct{}
+
+// WithStateDiffCollectorCtx adds a state diff collector to context
+func WithStateDiffCollectorCtx(ctx context.Context, c *PipelineStateDiffCollector) context.Context {
+	return context.WithValue(ctx, stateDiffCollectorContextKey{}, c)
+}
+
+// GetStateDiffCollectorCtx returns the state diff collector from context, nil if not set
+func GetStateDiffCollectorCtx(ctx context.Context) *PipelineStateDiffCollector {
+	c, _ := ctx.Value(stateDiffCollectorContextKey{}).(*PipelineStateDiffCollector)
+	return c
 }

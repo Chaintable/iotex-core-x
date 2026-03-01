@@ -879,6 +879,7 @@ func (builder *Builder) build(forSubChain, forTest bool) (*ChainService, error) 
 	}
 	cs := builder.cs
 	cs.stuckThreshold = builder.cfg.Chain.StuckThreshold
+	cs.vmTraceConfig = builder.cs.vmTraceConfig
 	builder.cs = nil
 
 	return cs, nil

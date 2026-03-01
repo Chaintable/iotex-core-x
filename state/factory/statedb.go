@@ -26,6 +26,7 @@ import (
 	"github.com/iotexproject/iotex-core/v2/action/protocol/execution/evm"
 	"github.com/iotexproject/iotex-core/v2/action/protocol/staking"
 	"github.com/iotexproject/iotex-core/v2/actpool"
+	"github.com/iotexproject/iotex-core/v2/blockchain"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/blockdao"
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
@@ -339,6 +340,9 @@ func (sdb *stateDB) Register(p protocol.Protocol) error {
 
 func (sdb *stateDB) Validate(ctx context.Context, blk *block.Block) error {
 	ctx = protocol.WithRegistry(ctx, sdb.registry)
+	if protocol.GetStateDiffCollectorCtx(ctx) == nil {
+		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
+	}
 	blkHash := blk.HashBlock()
 	ws, isExist, err := sdb.getFromWorkingSets(ctx, blkHash)
 	if err != nil {
@@ -368,6 +372,9 @@ func (sdb *stateDB) Mint(
 	ap actpool.ActPool,
 	pk crypto.PrivateKey,
 ) (*block.Block, error) {
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnCommit != nil {
+		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
+	}
 	bcCtx := protocol.MustGetBlockchainCtx(ctx)
 	expectedBlockHeight := bcCtx.Tip.Height + 1
 	ctx = protocol.WithRegistry(ctx, sdb.registry)
@@ -449,7 +456,7 @@ func (sdb *stateDB) WorkingSetAtHeight(ctx context.Context, height uint64) (prot
 }
 
 // PutBlock persists all changes in RunActions() into the DB
-func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) error {
+func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) (err error) {
 	sdb.mutex.Lock()
 	timer := sdb.timerFactory.NewTimer("Commit")
 	sdb.mutex.Unlock()
@@ -457,6 +464,19 @@ func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) error {
 	producer := blk.PublicKey().Address()
 	if producer == nil {
 		return errors.New("failed to get address")
+	}
+	hooks := protocol.GetPipelineHooksCtx(ctx)
+	if hooks != nil && hooks.OnBlockStart != nil {
+		gethBlock := blockchain.ConvertToGethBlock(blk, sdb.cfg.Genesis)
+		hooks.OnBlockStart(gethBlock)
+	}
+	if hooks != nil && hooks.OnBlockEnd != nil {
+		defer func() {
+			hooks.OnBlockEnd(err)
+		}()
+	}
+	if hooks != nil && hooks.OnCommit != nil {
+		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
 	}
 	ctx = protocol.WithRegistry(ctx, sdb.registry)
 	ws, isExist, err := sdb.getFromWorkingSets(ctx, blk.HashBlock())
@@ -648,6 +668,11 @@ func (sdb *stateDB) createGenesisStates(ctx context.Context) error {
 
 	if err := ws.Commit(ctx, 0); err != nil {
 		return err
+	}
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnGenesisBlock != nil {
+		gethBlock := blockchain.BuildGenesisGethBlock(sdb.cfg.Genesis)
+		alloc := blockchain.BuildGenesisAlloc(sdb.cfg.Genesis)
+		hooks.OnGenesisBlock(gethBlock, alloc)
 	}
 	sdb.protocolViews = ws.views
 	return nil
