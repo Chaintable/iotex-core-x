@@ -27,6 +27,11 @@ import (
 // Initialized from Kafka (LastPushedBlock) on restart, or computed on fresh start.
 var LastGethBlockHash common.Hash
 
+// GenesisStateRoot is set during createGenesisStates() to the genesis DeltaStateDigest.
+// BuildGenesisGethBlock uses it so the genesis geth block's Root field matches
+// block 1's originRoot, preventing leafage from fetching a non-existent state diff.
+var GenesisStateRoot common.Hash
+
 // ConvertToGethBlock converts an iotex block.Block to a geth types.Block
 func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 	// Determine parent geth hash for consistent hash chain in S3/Kafka pipeline.
@@ -136,6 +141,7 @@ func BuildGenesisGethBlock(g genesis.Genesis) *types.Block {
 		Time:       uint64(g.Timestamp),
 		GasLimit:   g.BlockGasLimitByHeight(0),
 		Difficulty: common.Big0,
+		Root:       GenesisStateRoot,
 	}
 	return types.NewBlockWithHeader(header)
 }

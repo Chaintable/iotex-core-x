@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
@@ -668,6 +669,12 @@ func (sdb *stateDB) createGenesisStates(ctx context.Context) error {
 
 	if err := ws.Commit(ctx, 0); err != nil {
 		return err
+	}
+	// Set GenesisStateRoot so BuildGenesisGethBlock includes the actual genesis
+	// state root in the geth header. This ensures leafage sees matching state roots
+	// between genesis and block 1, avoiding unnecessary state diff fetches.
+	if digest, err := ws.digest(); err == nil {
+		blockchain.GenesisStateRoot = common.BytesToHash(digest[:])
 	}
 	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnGenesisBlock != nil {
 		gethBlock := blockchain.BuildGenesisGethBlock(sdb.cfg.Genesis)
