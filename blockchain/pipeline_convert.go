@@ -10,7 +10,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/iotexproject/go-pkgs/hash"
 	"github.com/iotexproject/iotex-address/address"
 	"go.uber.org/zap"
 
@@ -39,13 +38,13 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		log.L().Info("ConvertToGethBlock: using cached LastGethBlockHash",
 			zap.Uint64("height", blk.Height()),
 			zap.String("parentHash", parentHash.Hex()),
-			zap.String("nativePrevHash", hash.Hash256(nativePrevHash).Hex()))
+			zap.String("nativePrevHash", common.BytesToHash(nativePrevHash[:]).Hex()))
 	} else if blk.Height() == 1 {
 		// Fresh start: genesis geth hash not cached yet, compute it
 		parentHash = BuildGenesisGethBlock(g).Hash()
 		log.L().Info("ConvertToGethBlock: fresh start block 1, computed genesis geth hash",
 			zap.String("parentHash", parentHash.Hex()),
-			zap.String("nativePrevHash", hash.Hash256(nativePrevHash).Hex()),
+			zap.String("nativePrevHash", common.BytesToHash(nativePrevHash[:]).Hex()),
 			zap.Int64("genesisTimestamp", g.Timestamp))
 	} else {
 		// Fallback: use IoTeX native hash (should not happen in normal operation)
