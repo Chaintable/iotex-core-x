@@ -268,14 +268,6 @@ func NewBlockchain(cfg Config, g genesis.Genesis, dao blockdao.BlockDAO, bbf Blo
 			chainConfig.ChainID = new(big.Int).SetUint64(uint64(cfg.EVMNetworkID))
 		}
 		chain.logger.OnBlockchainInit(chainConfig)
-		// Initialize geth hash cache for ConvertToGethBlock.
-		// On restart, LastPushedBlock() has the last block's geth hash from Kafka.
-		// On fresh start, this is nil and ConvertToGethBlock handles block 1 specially.
-		if tracer.NodeXPusher != nil {
-			if lastPushed := tracer.NodeXPusher.LastPushedBlock(); lastPushed != nil {
-				LastGethBlockHash = lastPushed.Hash
-			}
-		}
 	}
 
 	return chain
@@ -649,10 +641,8 @@ func (bc *blockchain) commitBlock(blk *block.Block) error {
 
 // getCommonAncestor finds the common ancestor between two block contexts and returns
 // the ancestor, the chain from ancestor to blocka (dropBlocks), and the chain from ancestor to blockb (newBlocks).
-// NOTE: The slow path (reorg walk-back) uses dao.GetBlockHash/Header which return IoTeX native hashes.
-// Since pushBlockChange now uses geth hashes, the slow path would not work correctly.
-// This is acceptable because IoTeX uses DPoS consensus with no reorgs — only the fast path
-// (blockb.ParentHash == blocka.Hash) is ever reached.
+// Both the fast path and slow path (reorg walk-back) use IoTeX native hashes consistently:
+// dao.GetBlockHash() returns native hashes, and pushBlockChange now uses native hashes too.
 func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptypes.BlockContext) (ptypes.BlockContext, []ptypes.BlockContext, []ptypes.BlockContext) {
 	var chainA, chainB []ptypes.BlockContext
 	if blockb.ParentHash == blocka.Hash {
@@ -719,7 +709,9 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 	return blocka, chainA, chainB
 }
 
-// pushBlockChange pushes block change notification to kafka
+// pushBlockChange pushes block change notification to kafka.
+// Uses IoTeX native hashes (via MixDigest embedded by ConvertToGethBlock) for block
+// identity, matching the official Babel API and writer ETH RPC.
 func (bc *blockchain) pushBlockChange(blk *block.Block) {
 	if tracer.NodeXPusher == nil {
 		return
@@ -729,21 +721,15 @@ func (bc *blockchain) pushBlockChange(blk *block.Block) {
 		return
 	}
 	lastCtx := *lastPushed
-	// Use geth hash from pipeline tracer (set in OnBlockStart via event.Block.Hash())
-	// to match S3 keys which also use geth hashes (uploaded in OnCommit).
-	// IoTeX DAO uses a different hash system (GenesisHash for block 0,
-	// protobuf hash for others) — do NOT use dao.GetBlockHash() here.
-	blkGethHash := tracer.BlockCtx.BlockHash
+	// Native hash extracted from MixDigest by the pipeline tracer in OnBlockStart
+	blkHash := tracer.BlockCtx.BlockHash
 
-	// For sequential blocks (always the case with DPoS — no reorgs),
-	// use lastCtx.Hash as ParentHash to maintain geth hash chain consistency
-	// in Kafka. blk.PrevHash() returns IoTeX native hash which differs from
-	// the geth hash stored in Kafka by OnGenesisBlock/OnCommit.
+	// ParentHash: for sequential blocks use lastCtx.Hash (from Kafka), otherwise
+	// fall back to blk.PrevHash(). Both are now IoTeX native hashes, so they're consistent.
 	var parentHash common.Hash
 	if blk.Height() == lastCtx.BlockNumber+1 {
 		parentHash = lastCtx.Hash
 	} else {
-		// Non-sequential: should not happen with DPoS consensus.
 		log.L().Warn("pushBlockChange: non-sequential block, falling back to native PrevHash",
 			zap.Uint64("blkHeight", blk.Height()),
 			zap.Uint64("lastPushedHeight", lastCtx.BlockNumber))
@@ -752,20 +738,20 @@ func (bc *blockchain) pushBlockChange(blk *block.Block) {
 
 	_, dropBlocks, newBlocks := bc.getCommonAncestor(lastCtx, ptypes.BlockContext{
 		BlockNumber: blk.Height(),
-		Hash:        blkGethHash,
+		Hash:        blkHash,
 		ParentHash:  parentHash,
 		Timestamp:   uint64(blk.Timestamp().Unix()),
 	})
 	var blockChange *ptypes.BlockChangeNotification
 	if len(dropBlocks) > 0 {
-		log.L().Info("pushBlockChange drop blocks", zap.String("hash", blkGethHash.Hex()))
+		log.L().Info("pushBlockChange drop blocks", zap.String("hash", blkHash.Hex()))
 		blockChange = &ptypes.BlockChangeNotification{
 			ChangeType: 2,
 			NewBlocks:  newBlocks,
 			DropBlocks: dropBlocks,
 		}
 	} else if len(newBlocks) > 0 {
-		log.L().Info("pushBlockChange new blocks", zap.String("hash", blkGethHash.Hex()))
+		log.L().Info("pushBlockChange new blocks", zap.String("hash", blkHash.Hex()))
 		blockChange = &ptypes.BlockChangeNotification{
 			ChangeType: 1,
 			NewBlocks:  newBlocks,

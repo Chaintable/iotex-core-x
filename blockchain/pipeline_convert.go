@@ -11,47 +11,31 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/iotexproject/iotex-address/address"
-	"go.uber.org/zap"
 
 	"github.com/iotexproject/iotex-core/v2/action"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
-	"github.com/iotexproject/iotex-core/v2/pkg/log"
 )
-
-// LastGethBlockHash caches the geth RLP hash of the most recently converted block.
-// This enables a consistent geth hash chain where each block's ParentHash matches
-// the parent block's geth hash (used as S3 key). Without this, IoTeX native PrevHash
-// (GenesisHash for block 0, protobuf hash for others) would be used, causing
-// mismatches with S3-stored block keys.
-// Initialized from Kafka (LastPushedBlock) on restart, or computed on fresh start.
-var LastGethBlockHash common.Hash
 
 // GenesisStateRoot is set during createGenesisStates() to the genesis DeltaStateDigest.
 // BuildGenesisGethBlock uses it so the genesis geth block's Root field matches
 // block 1's originRoot, preventing leafage from fetching a non-existent state diff.
 var GenesisStateRoot common.Hash
 
-// ConvertToGethBlock converts an iotex block.Block to a geth types.Block
+// ConvertToGethBlock converts an iotex block.Block to a geth types.Block.
+// The geth block serves as a data carrier for the pipeline tracer. We embed the
+// IoTeX native hash in header.MixDigest so the tracer can extract it without
+// cross-package imports. ParentHash is set to the IoTeX native parent hash
+// (GenesisHash for block 1, blk.PrevHash() for others).
 func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
-	// Determine parent geth hash for consistent hash chain in S3/Kafka pipeline.
-	// IoTeX native PrevHash differs from geth RLP hash for all blocks.
+	nativeHash := blk.HashBlock()
 	var parentHash common.Hash
 	if blk.Height() == 1 {
-		// Block 1's parent is always genesis — compute it deterministically.
-		// Must check this BEFORE cached LastGethBlockHash, because on restart
-		// with stale Kafka data, LastGethBlockHash may hold a hash from a
-		// previous run's higher block (not genesis).
-		parentHash = BuildGenesisGethBlock(g).Hash()
-	} else if LastGethBlockHash != (common.Hash{}) {
-		parentHash = LastGethBlockHash
+		genesisHash := block.GenesisHash()
+		parentHash = common.BytesToHash(genesisHash[:])
 	} else {
-		// Fallback: use IoTeX native hash (should not happen in normal operation)
-		nativePrevHash := blk.PrevHash()
-		parentHash = common.BytesToHash(nativePrevHash[:])
-		log.L().Warn("ConvertToGethBlock: FALLBACK to native PrevHash",
-			zap.Uint64("height", blk.Height()),
-			zap.String("parentHash", parentHash.Hex()))
+		prevHash := blk.PrevHash()
+		parentHash = common.BytesToHash(prevHash[:])
 	}
 	stateDigest := blk.DeltaStateDigest()
 	txRoot := blk.TxRoot()
@@ -62,6 +46,7 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		GasUsed:     blk.GasUsed(),
 		GasLimit:    g.BlockGasLimitByHeight(blk.Height()),
 		ParentHash:  parentHash,
+		MixDigest:   common.BytesToHash(nativeHash[:]),
 		Root:        common.BytesToHash(stateDigest[:]),
 		TxHash:      common.BytesToHash(txRoot[:]),
 		ReceiptHash: common.BytesToHash(receiptRoot[:]),
@@ -90,9 +75,7 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		}
 		txs = append(txs, ethTx)
 	}
-	gethBlock := types.NewBlockWithHeader(header).WithBody(txs, nil)
-	LastGethBlockHash = gethBlock.Hash()
-	return gethBlock
+	return types.NewBlockWithHeader(header).WithBody(txs, nil)
 }
 
 // ConvertToGethReceipt converts an iotex action.Receipt to a geth types.Receipt
@@ -134,14 +117,17 @@ func ConvertToGethReceipt(receipt *action.Receipt) *types.Receipt {
 	return r
 }
 
-// BuildGenesisGethBlock creates a geth types.Block for the genesis block (height=0)
+// BuildGenesisGethBlock creates a geth types.Block for the genesis block (height=0).
+// MixDigest is set to GenesisHash() (config hash) — the IoTeX native "block hash" for genesis.
 func BuildGenesisGethBlock(g genesis.Genesis) *types.Block {
+	genesisHash := block.GenesisHash()
 	header := &types.Header{
 		Number:     common.Big0,
 		Time:       uint64(g.Timestamp),
 		GasLimit:   g.BlockGasLimitByHeight(0),
 		Difficulty: common.Big0,
 		Root:       GenesisStateRoot,
+		MixDigest:  common.BytesToHash(genesisHash[:]),
 	}
 	return types.NewBlockWithHeader(header)
 }
