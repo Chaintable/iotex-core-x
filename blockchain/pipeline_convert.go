@@ -10,11 +10,14 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/iotexproject/go-pkgs/hash"
 	"github.com/iotexproject/iotex-address/address"
+	"go.uber.org/zap"
 
 	"github.com/iotexproject/iotex-core/v2/action"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
+	"github.com/iotexproject/iotex-core/v2/pkg/log"
 )
 
 // LastGethBlockHash caches the geth RLP hash of the most recently converted block.
@@ -30,15 +33,26 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 	// Determine parent geth hash for consistent hash chain in S3/Kafka pipeline.
 	// IoTeX native PrevHash differs from geth RLP hash for all blocks.
 	var parentHash common.Hash
+	nativePrevHash := blk.PrevHash()
 	if LastGethBlockHash != (common.Hash{}) {
 		parentHash = LastGethBlockHash
+		log.L().Info("ConvertToGethBlock: using cached LastGethBlockHash",
+			zap.Uint64("height", blk.Height()),
+			zap.String("parentHash", parentHash.Hex()),
+			zap.String("nativePrevHash", hash.Hash256(nativePrevHash).Hex()))
 	} else if blk.Height() == 1 {
 		// Fresh start: genesis geth hash not cached yet, compute it
 		parentHash = BuildGenesisGethBlock(g).Hash()
+		log.L().Info("ConvertToGethBlock: fresh start block 1, computed genesis geth hash",
+			zap.String("parentHash", parentHash.Hex()),
+			zap.String("nativePrevHash", hash.Hash256(nativePrevHash).Hex()),
+			zap.Int64("genesisTimestamp", g.Timestamp))
 	} else {
 		// Fallback: use IoTeX native hash (should not happen in normal operation)
-		prevHash := blk.PrevHash()
-		parentHash = common.BytesToHash(prevHash[:])
+		parentHash = common.BytesToHash(nativePrevHash[:])
+		log.L().Warn("ConvertToGethBlock: FALLBACK to native PrevHash",
+			zap.Uint64("height", blk.Height()),
+			zap.String("parentHash", parentHash.Hex()))
 	}
 	stateDigest := blk.DeltaStateDigest()
 	txRoot := blk.TxRoot()
