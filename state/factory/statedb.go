@@ -667,14 +667,13 @@ func (sdb *stateDB) createGenesisStates(ctx context.Context) error {
 		return err
 	}
 
-	if err := ws.Commit(ctx, 0); err != nil {
-		return err
-	}
-	// Set GenesisStateRoot so BuildGenesisGethBlock includes the actual genesis
-	// state root in the geth header. This ensures leafage sees matching state roots
-	// between genesis and block 1, avoiding unnecessary state diff fetches.
+	// Compute GenesisStateRoot BEFORE ws.Commit() because trieless state DB's
+	// Digest() hashes the pending write queue, which is emptied by Commit().
 	if digest, err := ws.digest(); err == nil {
 		blockchain.GenesisStateRoot = common.BytesToHash(digest[:])
+	}
+	if err := ws.Commit(ctx, 0); err != nil {
+		return err
 	}
 	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnGenesisBlock != nil {
 		gethBlock := blockchain.BuildGenesisGethBlock(sdb.cfg.Genesis)

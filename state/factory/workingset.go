@@ -363,6 +363,14 @@ func (ws *workingSet) Commit(ctx context.Context, retention uint64) error {
 	if err := protocolPreCommit(ctx, ws); err != nil {
 		return err
 	}
+	// Compute digest BEFORE store.Commit() because the trieless state DB's
+	// Digest() hashes the pending write queue, which becomes empty after Flush().
+	// Post-commit Digest() always returns Keccak256(empty), losing the real state root.
+	var preCommitDigest hash.Hash256
+	var preCommitDigestErr error
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnCommit != nil {
+		preCommitDigest, preCommitDigestErr = ws.digest()
+	}
 	if err := ws.store.Commit(ctx, retention); err != nil {
 		return err
 	}
@@ -372,11 +380,10 @@ func (ws *workingSet) Commit(ctx context.Context, retention uint64) error {
 			collector = protocol.GetStateDiffCollectorCtx(ctx)
 		}
 		if collector != nil {
-			digest, err := ws.digest()
-			if err != nil {
-				return err
+			if preCommitDigestErr != nil {
+				return preCommitDigestErr
 			}
-			root := common.BytesToHash(digest[:])
+			root := common.BytesToHash(preCommitDigest[:])
 			var originRoot common.Hash
 			if bcCtx, ok := protocol.GetBlockchainCtx(ctx); ok {
 				originRoot = common.BytesToHash(bcCtx.Tip.StateDigest[:])
