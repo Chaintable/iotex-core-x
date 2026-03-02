@@ -32,22 +32,17 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 	// Determine parent geth hash for consistent hash chain in S3/Kafka pipeline.
 	// IoTeX native PrevHash differs from geth RLP hash for all blocks.
 	var parentHash common.Hash
-	nativePrevHash := blk.PrevHash()
-	if LastGethBlockHash != (common.Hash{}) {
-		parentHash = LastGethBlockHash
-		log.L().Info("ConvertToGethBlock: using cached LastGethBlockHash",
-			zap.Uint64("height", blk.Height()),
-			zap.String("parentHash", parentHash.Hex()),
-			zap.String("nativePrevHash", common.BytesToHash(nativePrevHash[:]).Hex()))
-	} else if blk.Height() == 1 {
-		// Fresh start: genesis geth hash not cached yet, compute it
+	if blk.Height() == 1 {
+		// Block 1's parent is always genesis — compute it deterministically.
+		// Must check this BEFORE cached LastGethBlockHash, because on restart
+		// with stale Kafka data, LastGethBlockHash may hold a hash from a
+		// previous run's higher block (not genesis).
 		parentHash = BuildGenesisGethBlock(g).Hash()
-		log.L().Info("ConvertToGethBlock: fresh start block 1, computed genesis geth hash",
-			zap.String("parentHash", parentHash.Hex()),
-			zap.String("nativePrevHash", common.BytesToHash(nativePrevHash[:]).Hex()),
-			zap.Int64("genesisTimestamp", g.Timestamp))
+	} else if LastGethBlockHash != (common.Hash{}) {
+		parentHash = LastGethBlockHash
 	} else {
 		// Fallback: use IoTeX native hash (should not happen in normal operation)
+		nativePrevHash := blk.PrevHash()
 		parentHash = common.BytesToHash(nativePrevHash[:])
 		log.L().Warn("ConvertToGethBlock: FALLBACK to native PrevHash",
 			zap.Uint64("height", blk.Height()),
