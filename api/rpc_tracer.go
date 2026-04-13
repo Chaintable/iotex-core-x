@@ -24,7 +24,8 @@ type iotexRPCTracer struct {
 	// pre-computed action list for CaptureTxStart → OnTxStart bridging
 	actions    []*action.SealedEnvelope
 	currentIdx int
-	txStarted  bool // guards against double CaptureTxStart for Execution actions
+	txStarted      bool // guards against double CaptureTxStart for Execution actions
+	captureStarted bool // true after CaptureStart, safe to call OnLog
 }
 
 func newIotexRPCTracer() *iotexRPCTracer {
@@ -86,10 +87,12 @@ func (t *iotexRPCTracer) CaptureTxEnd(restGas uint64) {
 }
 
 func (t *iotexRPCTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
+	t.captureStarted = true
 	t.inner.CaptureStart(env, from, to, create, input, gas, value)
 }
 
 func (t *iotexRPCTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
+	t.captureStarted = false
 	t.inner.CaptureEnd(output, gasUsed, err)
 }
 
@@ -110,6 +113,10 @@ func (t *iotexRPCTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64,
 }
 
 // OnLog delegates to inner RPCTracer for event collection.
+// Guard against empty callstack — IoTeX's MakeTransfer emits logs before CaptureStart.
 func (t *iotexRPCTracer) OnLog(l *types.Log) {
+	if !t.captureStarted {
+		return
+	}
 	t.inner.OnLog(l)
 }
