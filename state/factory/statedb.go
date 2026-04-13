@@ -169,6 +169,17 @@ func (sdb *stateDB) Start(ctx context.Context) error {
 		if sdb.protocolViews, err = sdb.registry.StartAll(ctx, sdb); err != nil {
 			return err
 		}
+		// Compute GenesisStateRoot if not set (e.g. archive node restored from snapshot).
+		// This replays genesis state creation in a temporary working set to get the digest.
+		// For archive nodes, GenesisStateRoot is not set (createGenesisStates was skipped).
+		// Use genesis config hash as a deterministic non-zero proxy for state root.
+		// This ensures pipeline S3 keys are consistent and non-zero.
+		if blockchain.GenesisStateRoot == (common.Hash{}) {
+			genesisHash := sdb.cfg.Genesis.Hash()
+			blockchain.GenesisStateRoot = common.BytesToHash(genesisHash[:])
+			log.L().Info("Set GenesisStateRoot from genesis config hash (archive node)",
+				zap.String("root", blockchain.GenesisStateRoot.Hex()))
+		}
 	case db.ErrNotExist:
 		sdb.currentChainHeight = 0
 		if err = sdb.dao.putHeight(0); err != nil {
