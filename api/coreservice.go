@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	ptypes "github.com/Chaintable/pipeline/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -190,6 +191,8 @@ type (
 		Track(ctx context.Context, start time.Time, method string, size int64, success bool)
 		// BlobSidecarsByHeight returns blob sidecars by height
 		BlobSidecarsByHeight(height uint64) ([]*apitypes.BlobSidecarResult, error)
+		// DebankBlock returns trace_debankBlock output for a given block height
+		DebankBlock(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error)
 		// TraceBlockByNumber returns the trace result of a block by its height
 		TraceBlockByNumber(ctx context.Context, height uint64, config *tracers.TraceConfig) ([][]byte, []*action.Receipt, any, error)
 		//  TraceBlockByHash returns the trace result of a block by its hash
@@ -2335,4 +2338,119 @@ func filterReceipts(receipts []*action.Receipt, actHash hash.Hash256) *action.Re
 		}
 	}
 	return nil
+}
+
+// DebankBlock replays a block and returns trace_debankBlock output.
+func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error) {
+	g := core.bc.Genesis()
+
+	// genesis block: special case
+	if height == 0 {
+		return buildGenesisDebankOutput(g)
+	}
+
+	blk, err := core.dao.GetBlockByHeight(height)
+	if err != nil {
+		return nil, err
+	}
+
+	// set up block context
+	ctx, err = core.bc.ContextAtHeight(ctx, blk.Height())
+	if err != nil {
+		return nil, err
+	}
+	ctx = protocol.WithBlockCtx(ctx, protocol.BlockCtx{
+		BlockHeight:    blk.Height(),
+		BlockTimeStamp: blk.Timestamp(),
+		GasLimit:       g.BlockGasLimitByHeight(blk.Height()),
+		Producer:       blk.PublicKey().Address(),
+		Simulate:       true,
+	})
+	ctx = protocol.WithRegistry(ctx, core.registry)
+	ctx = protocol.WithFeatureCtx(ctx)
+
+	// create RPC tracer
+	rpcTracer := newIotexRPCTracer()
+	gethBlock := buildSyntheticGethBlock(blk, g)
+	rpcTracer.OnBlockStart(gethBlock)
+	rpcTracer.SetActions(blk.Actions)
+
+	// per-action EVM state diffs (storages + codes)
+	var evmDiffs []perActionStateDiff
+
+	// set up tracer context
+	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer})
+	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
+		CaptureTx: func(retval []byte, receipt *action.Receipt) {
+			// find the corresponding action by receipt hash
+			idx := rpcTracer.currentIdx
+			if idx > 0 {
+				idx-- // currentIdx was already incremented by CaptureTxEnd
+			}
+			if idx < len(blk.Actions) {
+				selp := blk.Actions[idx]
+				gethReceipt := convertActionReceiptToGethReceipt(receipt, selp)
+				if gethReceipt != nil {
+					rpcTracer.OnTxEnd(gethReceipt, nil)
+				}
+			}
+		},
+		CaptureStateDiff: func(destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte) {
+			evmDiffs = append(evmDiffs, perActionStateDiff{
+				destructs: destructs,
+				accounts:  accounts,
+				storages:  storages,
+				codes:     codes,
+			})
+		},
+		OnLog: rpcTracer.OnLog,
+	})
+
+	// set up workingset-level state diff collector for non-EVM action balance changes
+	collector := protocol.NewPipelineStateDiffCollector()
+	ctx = protocol.WithStateDiffCollectorCtx(ctx, collector)
+
+	// replay all actions
+	ws, err := core.sf.WorkingSetAtTransaction(ctx, blk.Height(), blk.Actions...)
+	if err != nil {
+		return nil, err
+	}
+	defer ws.Close()
+
+	// merge state diffs from two layers:
+	// - accounts/destructs: from workingset collector (covers all actions incl. staking/reward)
+	// - storages/codes: from per-action EVM StateDiff merge
+	_, _, evmStorages, evmCodes := mergeStateDiffs(evmDiffs)
+
+	// use collector's accounts/destructs (covers non-EVM actions)
+	finalAccounts := collector.Accounts
+	finalDestructs := collector.Destructs
+
+	// merge EVM storages into collector storages
+	finalStorages := collector.Storages
+	for addr, slots := range evmStorages {
+		if existing, ok := finalStorages[addr]; ok {
+			for k, v := range slots {
+				existing[k] = v
+			}
+		} else {
+			finalStorages[addr] = slots
+		}
+	}
+
+	// merge EVM codes into collector codes
+	finalCodes := collector.Codes
+	for k, v := range evmCodes {
+		finalCodes[k] = v
+	}
+
+	// compute state roots (use empty hash as placeholder — IoTeX uses DeltaStateDigest)
+	originRoot := common.Hash{}
+	root := common.Hash{}
+	if blk.Height() > 0 {
+		stateDigest := blk.DeltaStateDigest()
+		root = common.BytesToHash(stateDigest[:])
+	}
+
+	return rpcTracer.GetOutPut(originRoot, root, finalDestructs, finalAccounts, finalStorages, finalCodes), nil
 }

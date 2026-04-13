@@ -259,6 +259,8 @@ func (svr *web3Handler) handleWeb3Req(ctx context.Context, web3Req *gjson.Result
 		res, err = svr.unsubscribe(web3Req)
 	case "eth_getBlobSidecars":
 		res, err = svr.getBlobSidecars(web3Req)
+	case "trace_debankBlock":
+		res, err = svr.debankBlock(ctx, web3Req)
 	case "debug_traceTransaction":
 		res, err = svr.traceTransaction(ctx, web3Req)
 	case "debug_traceCall":
@@ -1346,6 +1348,19 @@ func (svr *web3Handler) traceCall(ctx context.Context, in *gjson.Result) (interf
 	default:
 		return nil, fmt.Errorf("unknown tracer type: %T", tracer)
 	}
+}
+
+func (svr *web3Handler) debankBlock(ctx context.Context, in *gjson.Result) (any, error) {
+	blkParam := in.Get("params.0")
+	blkNum, err := parseBlockNumberOrHash(&blkParam)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse block number")
+	}
+	height, _, err := svr.blockNumberOrHashToHeight(blkNum)
+	if err != nil {
+		return nil, err
+	}
+	return svr.coreService.DebankBlock(ctx, height)
 }
 
 func (svr *web3Handler) traceBlockByNumber(ctx context.Context, in *gjson.Result) (any, error) {

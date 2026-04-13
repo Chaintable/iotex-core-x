@@ -847,6 +847,9 @@ func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
 	if hooks := protocol.GetPipelineHooksCtx(stateDB.ctx); hooks != nil && hooks.OnLog != nil {
 		hooks.OnLog(evmLog)
 	}
+	if t, ok := GetTracerCtx(stateDB.ctx); ok && t.OnLog != nil {
+		t.OnLog(evmLog)
+	}
 	log.T(stateDB.ctx).Debug("Called AddLog.", zap.Any("log", evmLog))
 	addr, err := address.FromBytes(evmLog.Address.Bytes())
 	if stateDB.assertError(err, "Failed to convert evm address.", zap.Error(err)) {
@@ -1214,6 +1217,85 @@ func (stateDB *StateDBAdapter) collectAccountState(collector *protocol.PipelineS
 	}
 	addrHash := crypto.Keccak256Hash(addr[:])
 	collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
+}
+
+// StateDiff returns per-action state changes for trace_debankBlock RPC.
+// Must be called BEFORE CommitContracts/clear, as it reads from contract.committed and trie.
+func (stateDB *StateDBAdapter) StateDiff() (
+	destructs map[common.Hash]struct{},
+	accounts map[common.Hash][]byte,
+	storages map[common.Hash]map[common.Hash][]byte,
+	codes map[common.Hash][]byte,
+) {
+	destructs = make(map[common.Hash]struct{})
+	accounts = make(map[common.Hash][]byte)
+	storages = make(map[common.Hash]map[common.Hash][]byte)
+	codes = make(map[common.Hash][]byte)
+
+	// destructs
+	for addr := range stateDB.selfDestructed {
+		destructs[crypto.Keccak256Hash(addr[:])] = struct{}{}
+	}
+
+	// contracts: storages + codes + accounts
+	for addr, c := range stateDB.cachedContract {
+		if _, ok := stateDB.selfDestructed[addr]; ok {
+			continue
+		}
+		addrHash := crypto.Keccak256Hash(addr[:])
+		inner := getInnerContract(c)
+		if inner != nil {
+			// storage diffs from committed map (tracks all SetState calls)
+			if len(inner.committed) > 0 {
+				storageMap := make(map[common.Hash][]byte, len(inner.committed))
+				for key := range inner.committed {
+					val, _ := inner.trie.Get(key[:])
+					slotHash := crypto.Keccak256Hash(key[:])
+					if len(val) > 0 && !isAllZero(val) {
+						encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
+						storageMap[slotHash] = encoded
+					} else {
+						storageMap[slotHash] = nil
+					}
+				}
+				storages[addrHash] = storageMap
+			}
+			// new code deployments
+			if inner.dirtyCode && len(inner.code) > 0 {
+				codeHash := common.BytesToHash(inner.Account.CodeHash)
+				codes[codeHash] = common.CopyBytes(inner.code)
+			}
+		}
+		// account state (nonce, balance, root, codehash)
+		acc := c.SelfState()
+		gethAcc := types.StateAccount{
+			Nonce:    acc.PendingNonce(),
+			Balance:  uint256.MustFromBig(acc.Balance),
+			Root:     common.BytesToHash(acc.Root[:]),
+			CodeHash: acc.CodeHash,
+		}
+		accounts[addrHash] = types.SlimAccountRLP(gethAcc)
+	}
+
+	// non-contract (EOA) accounts modified by EVM
+	for addr := range stateDB.dirtyAccounts {
+		addrHash := crypto.Keccak256Hash(addr[:])
+		if _, exists := accounts[addrHash]; exists {
+			continue
+		}
+		acc, err := stateDB.accountState(addr)
+		if err != nil {
+			continue
+		}
+		gethAcc := types.StateAccount{
+			Nonce:    acc.PendingNonce(),
+			Balance:  uint256.MustFromBig(acc.Balance),
+			Root:     common.BytesToHash(acc.Root[:]),
+			CodeHash: acc.CodeHash,
+		}
+		accounts[addrHash] = types.SlimAccountRLP(gethAcc)
+	}
+	return
 }
 
 // getInnerContract extracts the underlying *contract from a Contract interface

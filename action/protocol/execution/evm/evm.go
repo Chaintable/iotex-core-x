@@ -317,6 +317,13 @@ func ExecuteContract(
 		}
 	}
 
+	// capture per-action EVM state diff before CommitContracts/clear wipes tracking data
+	if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil {
+		if adapter, ok := stateDB.(*StateDBAdapter); ok {
+			destructs, accts, stors, cds := adapter.StateDiff()
+			t.CaptureStateDiff(destructs, accts, stors, cds)
+		}
+	}
 	if err := stateDB.CommitContracts(); err != nil {
 		return nil, nil, errors.Wrap(err, "failed to commit contracts to underlying db")
 	}

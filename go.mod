@@ -3,7 +3,7 @@ module github.com/iotexproject/iotex-core/v2
 go 1.24
 
 require (
-	github.com/Chaintable/pipeline v0.0.64-0.20260302065725-712e3daf8476
+	github.com/Chaintable/pipeline v0.0.64-0.20260413142006-97f0506d87c2
 	github.com/agiledragon/gomonkey/v2 v2.13.0
 	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/cenkalti/backoff v2.2.1+incompatible

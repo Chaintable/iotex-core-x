@@ -3,6 +3,8 @@ package evm
 import (
 	"context"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/iotexproject/iotex-core/v2/action"
 	"github.com/iotexproject/iotex-core/v2/action/protocol"
 	"github.com/iotexproject/iotex-core/v2/pkg/log"
@@ -22,6 +24,15 @@ type (
 	// TracerContext is the context for EVM tracer
 	TracerContext struct {
 		CaptureTx func([]byte, *action.Receipt)
+		// CaptureStateDiff is called per-action before CommitContracts/clear to capture EVM storage/code diffs.
+		CaptureStateDiff func(
+			destructs map[common.Hash]struct{},
+			accounts map[common.Hash][]byte,
+			storages map[common.Hash]map[common.Hash][]byte,
+			codes map[common.Hash][]byte,
+		)
+		// OnLog is called when a log is emitted during EVM execution (for trace_debankBlock events).
+		OnLog func(*types.Log)
 	}
 )
 
