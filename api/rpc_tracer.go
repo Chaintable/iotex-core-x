@@ -15,12 +15,16 @@ var _ vm.EVMLogger = (*iotexRPCTracer)(nil)
 
 // iotexRPCTracer wraps pipeline's RPCTracer to bridge IoTeX's action-based execution
 // model (CaptureTxStart without tx info) to RPCTracer's OnTxStart(tx, from).
+//
+// IoTeX calls CaptureTxStart twice for *action.Execution:
+// once in TraceStart and once in executeInEVM. txStarted prevents double init.
 type iotexRPCTracer struct {
 	inner *ptracer.RPCTracer
 
 	// pre-computed action list for CaptureTxStart → OnTxStart bridging
 	actions    []*action.SealedEnvelope
 	currentIdx int
+	txStarted  bool // guards against double CaptureTxStart for Execution actions
 }
 
 func newIotexRPCTracer() *iotexRPCTracer {
@@ -52,12 +56,17 @@ func (t *iotexRPCTracer) GetOutPut(originRoot, root common.Hash, destructs map[c
 // vm.EVMLogger interface implementation
 
 func (t *iotexRPCTracer) CaptureTxStart(gasLimit uint64) {
+	if t.txStarted {
+		// Already initialized by TraceStart, skip duplicate call from executeInEVM
+		return
+	}
+	t.txStarted = true
 	// Bridge: look up pre-computed ethTx by index, call inner.OnTxStart
 	if t.currentIdx < len(t.actions) {
 		selp := t.actions[t.currentIdx]
 		ethTx, err := selp.ToEthTx()
 		if err != nil {
-			// non-EVM action — skip
+			// non-EVM action — skip OnTxStart but keep txStarted=true
 			return
 		}
 		senderAddr := selp.SenderAddress()
@@ -67,6 +76,11 @@ func (t *iotexRPCTracer) CaptureTxStart(gasLimit uint64) {
 }
 
 func (t *iotexRPCTracer) CaptureTxEnd(restGas uint64) {
+	if !t.txStarted {
+		// Duplicate CaptureTxEnd from executeInEVM defer — skip
+		return
+	}
+	t.txStarted = false
 	t.currentIdx++
 	t.inner.CaptureTxEnd(restGas)
 }
