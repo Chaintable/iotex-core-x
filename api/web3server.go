@@ -1356,9 +1356,13 @@ func (svr *web3Handler) debankBlock(ctx context.Context, in *gjson.Result) (any,
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse block number")
 	}
-	height, _, err := svr.blockNumberOrHashToHeight(blkNum)
+	height, isExact, err := svr.blockNumberOrHashToHeight(blkNum)
 	if err != nil {
 		return nil, err
+	}
+	if !isExact {
+		// "latest"/"pending"/"safe"/"finalized" return height=0 with isExact=false
+		height = svr.coreService.TipHeight()
 	}
 	return svr.coreService.DebankBlock(ctx, height)
 }

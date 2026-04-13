@@ -84,11 +84,11 @@ func TraceStart(ctx context.Context, ws protocol.StateManager, elp action.Envelo
 	default:
 		return errors.New("only eth compatible action is supported for tracing")
 	}
-	vmCtx.Tracer.CaptureTxStart(elp.Gas())
 	if _, isExecution := elp.Action().(*action.Execution); isExecution {
-		// CaptureStart will be called in evm
+		// Both CaptureTxStart and CaptureStart will be called in executeInEVM
 		return nil
 	}
+	vmCtx.Tracer.CaptureTxStart(elp.Gas())
 	actCtx := protocol.MustGetActionCtx(ctx)
 	vmCtx.Tracer.CaptureStart(evm, common.Address(actCtx.Caller.Bytes()), *to, false, input, elp.Gas(), value)
 	return nil
@@ -101,8 +101,12 @@ func TraceEnd(ctx context.Context, ws protocol.StateManager, elp action.Envelope
 		return
 	}
 	output := receipt.Output
-	vmCtx.Tracer.CaptureEnd(output, receipt.GasConsumed, nil)
-	vmCtx.Tracer.CaptureTxEnd(elp.Gas() - receipt.GasConsumed)
+	if _, isExecution := elp.Action().(*action.Execution); !isExecution {
+		// For non-Execution actions, CaptureEnd/CaptureTxEnd are called here.
+		// For Execution actions, they are called by executeInEVM's defer.
+		vmCtx.Tracer.CaptureEnd(output, receipt.GasConsumed, nil)
+		vmCtx.Tracer.CaptureTxEnd(elp.Gas() - receipt.GasConsumed)
+	}
 	if t, ok := GetTracerCtx(ctx); ok {
 		t.CaptureTx(output, receipt)
 	}
