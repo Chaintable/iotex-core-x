@@ -130,6 +130,8 @@
 
 ### 4.1 字段验证 (逐字段与 debug_traceTransaction 对比)
 
+注：debug_traceTransaction 在自定义镜像上报 "unknown tracer type"（iotex-core-x 已有 bug），官方镜像上可用但缺少 EVM tx 数据。此对比测试待 debug_traceTransaction 修复后补充。
+
 | # | 字段 | 类型 | debug_traceTransaction 对应 | 结果 |
 |---|------|------|--------------------------|------|
 | 4.1.1 | id | string(MD5 hex, 32 chars) | 无对应 (DeBank 自有字段) | |

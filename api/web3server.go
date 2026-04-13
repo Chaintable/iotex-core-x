@@ -1298,19 +1298,24 @@ func (svr *web3Handler) traceTransaction(ctx context.Context, in *gjson.Result) 
 	if err != nil {
 		return nil, err
 	}
-	switch tracer := tracer.(type) {
+	// Unwrap the evmTracer wrapper to get the inner logger/tracer
+	et, ok := tracer.(*evmTracer)
+	if !ok {
+		return nil, fmt.Errorf("unexpected tracer type: %T", tracer)
+	}
+	switch innerTracer := et.Unwrap().(type) {
 	case *logger.StructLogger:
 		return &debugTraceTransactionResult{
 			Failed:      receipt.Status != uint64(iotextypes.ReceiptStatus_Success),
 			Revert:      receipt.ExecutionRevertMsg(),
 			ReturnValue: byteToHex(retval),
-			StructLogs:  fromLoggerStructLogs(tracer.StructLogs()),
+			StructLogs:  fromLoggerStructLogs(innerTracer.StructLogs()),
 			Gas:         receipt.GasConsumed,
 		}, nil
 	case tracers.Tracer:
-		return tracer.GetResult()
+		return innerTracer.GetResult()
 	default:
-		return nil, fmt.Errorf("unknown tracer type: %T", tracer)
+		return nil, fmt.Errorf("unknown tracer type: %T", innerTracer)
 	}
 }
 
@@ -1334,19 +1339,23 @@ func (svr *web3Handler) traceCall(ctx context.Context, in *gjson.Result) (interf
 	if err != nil {
 		return nil, err
 	}
-	switch tracer := tracer.(type) {
+	et, ok := tracer.(*evmTracer)
+	if !ok {
+		return nil, fmt.Errorf("unexpected tracer type: %T", tracer)
+	}
+	switch innerTracer := et.Unwrap().(type) {
 	case *logger.StructLogger:
 		return &debugTraceTransactionResult{
 			Failed:      receipt.Status != uint64(iotextypes.ReceiptStatus_Success),
 			Revert:      receipt.ExecutionRevertMsg(),
 			ReturnValue: byteToHex(retval),
-			StructLogs:  fromLoggerStructLogs(tracer.StructLogs()),
+			StructLogs:  fromLoggerStructLogs(innerTracer.StructLogs()),
 			Gas:         receipt.GasConsumed,
 		}, nil
 	case tracers.Tracer:
-		return tracer.GetResult()
+		return innerTracer.GetResult()
 	default:
-		return nil, fmt.Errorf("unknown tracer type: %T", tracer)
+		return nil, fmt.Errorf("unknown tracer type: %T", innerTracer)
 	}
 }
 

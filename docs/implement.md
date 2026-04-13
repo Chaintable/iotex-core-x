@@ -54,6 +54,13 @@
 - Section 12: 性能 30ms PASS, parent_id 链 PASS
 - Batch: 10 blocks hash 全部 PASS, 单 tx 区块 tx 数量匹配
 
+## 2026-04-14 debug_traceTransaction "unknown tracer type" 是已有 bug
+
+**发现**: `debug_traceTransaction` 对 EVM tx 报 `"unknown tracer type: *api.evmTracer"`
+**根因**: `traceTransaction`（web3server.go:1301）直接对 `traceTx` 返回的 `*evmTracer` 做 type switch，但 `*evmTracer` 不是 `*logger.StructLogger` 也不是 `tracers.Tracer`。应该用 `tracer.(*evmTracer).Unwrap()` 拿到内部 tracer 再做 switch（`traceBlock` 就是这样做的）。
+**影响**: 与 trace_debankBlock 无关，是 iotex-core-x 分支 `traceTx` 重构后的遗留 bug。x5 旧镜像未暴露是因为没有 EVM tx 可测。
+**修复**: web3server.go:1301 改为 `tracer.(*evmTracer).Unwrap()` 后再 switch
+
 ## 2026-04-13 DebankBlock 缺少 HelperCtx 导致 panic
 
 **发现**: 首次部署测试时 `trace_debankBlock` 返回 500，日志显示 `Miss evm helper context` panic。
