@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"math/big"
 
 	ptracer "github.com/Chaintable/pipeline/tracer"
@@ -98,6 +99,10 @@ func (t *iotexRPCTracer) CaptureTxStart(gasLimit uint64) {
 		senderAddr := selp.SenderAddress()
 		from := common.BytesToAddress(senderAddr.Bytes())
 		t.inner.OnTxStart(signedTx, from)
+		// override tx hash with IoTeX native action hash (eth_getBlockByNumber uses this)
+		if actHash, err := selp.Hash(); err == nil {
+			t.inner.SetTxHash("0x" + hex.EncodeToString(actHash[:]))
+		}
 	}
 }
 
