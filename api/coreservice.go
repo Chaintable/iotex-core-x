@@ -2376,7 +2376,7 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	})
 
 	// create RPC tracer
-	rpcTracer := newIotexRPCTracer()
+	rpcTracer := newIotexRPCTracer(core.bc.ChainID())
 	gethBlock := buildSyntheticGethBlock(blk, g)
 	rpcTracer.OnBlockStart(gethBlock)
 	rpcTracer.SetActions(blk.Actions)
@@ -2388,15 +2388,17 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer})
 	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
 		CaptureTx: func(retval []byte, receipt *action.Receipt) {
-			// find the corresponding action by receipt hash
 			idx := rpcTracer.currentIdx
 			if idx > 0 {
 				idx-- // currentIdx was already incremented by CaptureTxEnd
 			}
 			if idx < len(blk.Actions) {
 				selp := blk.Actions[idx]
+				// set TxIndex before converting — updateReceiptIndex hasn't run yet
+				receipt.TxIndex = uint32(idx)
 				gethReceipt := convertActionReceiptToGethReceipt(receipt, selp)
 				if gethReceipt != nil {
+					gethReceipt.TransactionIndex = uint(idx)
 					rpcTracer.OnTxEnd(gethReceipt, nil)
 				}
 			}

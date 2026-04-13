@@ -1363,6 +1363,9 @@ func (svr *web3Handler) debankBlock(ctx context.Context, in *gjson.Result) (any,
 	if !isExact {
 		// "latest"/"pending"/"safe"/"finalized" return height=0 with isExact=false
 		height = svr.coreService.TipHeight()
+	} else if blkNum.BlockNumber != nil && *blkNum.BlockNumber == rpc.EarliestBlockNumber {
+		// "earliest" maps to IoTeX genesis (height=0), not block 1
+		height = 0
 	}
 	return svr.coreService.DebankBlock(ctx, height)
 }

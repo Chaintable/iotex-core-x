@@ -9,6 +9,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/iotexproject/iotex-core/v2/action"
+	"github.com/iotexproject/iotex-core/v2/pkg/log"
+	"github.com/iotexproject/iotex-proto/golang/iotextypes"
+	"go.uber.org/zap"
 )
 
 var _ vm.EVMLogger = (*iotexRPCTracer)(nil)
@@ -24,13 +27,16 @@ type iotexRPCTracer struct {
 	// pre-computed action list for CaptureTxStart → OnTxStart bridging
 	actions    []*action.SealedEnvelope
 	currentIdx int
+	chainID    uint32 // for constructing signed eth tx hash
 	txStarted      bool // guards against double CaptureTxStart for Execution actions
 	captureStarted bool // true after CaptureStart, safe to call OnLog
+	logIndex       uint // global log index counter within block
 }
 
-func newIotexRPCTracer() *iotexRPCTracer {
+func newIotexRPCTracer(chainID uint32) *iotexRPCTracer {
 	return &iotexRPCTracer{
-		inner: &ptracer.RPCTracer{},
+		inner:   &ptracer.RPCTracer{},
+		chainID: chainID,
 	}
 }
 
@@ -39,6 +45,7 @@ func newIotexRPCTracer() *iotexRPCTracer {
 func (t *iotexRPCTracer) SetActions(actions []*action.SealedEnvelope) {
 	t.actions = actions
 	t.currentIdx = 0
+	t.logIndex = 0
 }
 
 func (t *iotexRPCTracer) OnBlockStart(block *types.Block) {
@@ -65,14 +72,32 @@ func (t *iotexRPCTracer) CaptureTxStart(gasLimit uint64) {
 	// Bridge: look up pre-computed ethTx by index, call inner.OnTxStart
 	if t.currentIdx < len(t.actions) {
 		selp := t.actions[t.currentIdx]
-		ethTx, err := selp.ToEthTx()
+		rawTx, err := selp.ToEthTx()
 		if err != nil {
 			// non-EVM action — skip OnTxStart but keep txStarted=true
 			return
 		}
+		// construct signed tx so tx hash matches eth_getBlockByNumber
+		signer, err := action.NewEthSigner(iotextypes.Encoding(selp.Encoding()), t.chainID)
+		if err != nil {
+			log.L().Debug("failed to create eth signer for debankBlock", zap.Error(err))
+			// fallback to unsigned tx
+			senderAddr := selp.SenderAddress()
+			from := common.BytesToAddress(senderAddr.Bytes())
+			t.inner.OnTxStart(rawTx, from)
+			return
+		}
+		signedTx, err := action.RawTxToSignedTx(rawTx, signer, selp.Signature())
+		if err != nil {
+			log.L().Debug("failed to sign eth tx for debankBlock", zap.Error(err))
+			senderAddr := selp.SenderAddress()
+			from := common.BytesToAddress(senderAddr.Bytes())
+			t.inner.OnTxStart(rawTx, from)
+			return
+		}
 		senderAddr := selp.SenderAddress()
 		from := common.BytesToAddress(senderAddr.Bytes())
-		t.inner.OnTxStart(ethTx, from)
+		t.inner.OnTxStart(signedTx, from)
 	}
 }
 
@@ -114,9 +139,12 @@ func (t *iotexRPCTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64,
 
 // OnLog delegates to inner RPCTracer for event collection.
 // Guard against empty callstack — IoTeX's MakeTransfer emits logs before CaptureStart.
+// Also sets the global log index since EVM doesn't fill Log.Index.
 func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	if !t.captureStarted {
 		return
 	}
+	l.Index = t.logIndex
+	t.logIndex++
 	t.inner.OnLog(l)
 }
