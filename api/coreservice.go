@@ -2368,6 +2368,12 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	})
 	ctx = protocol.WithRegistry(ctx, core.registry)
 	ctx = protocol.WithFeatureCtx(ctx)
+	bcCtx := protocol.MustGetBlockchainCtx(ctx)
+	ctx = evm.WithHelperCtx(ctx, evm.HelperContext{
+		GetBlockHash:   bcCtx.GetBlockHash,
+		GetBlockTime:   bcCtx.GetBlockTime,
+		DepositGasFunc: rewarding.DepositGas,
+	})
 
 	// create RPC tracer
 	rpcTracer := newIotexRPCTracer()
@@ -2413,9 +2419,11 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	// replay all actions
 	ws, err := core.sf.WorkingSetAtTransaction(ctx, blk.Height(), blk.Actions...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("WorkingSetAtTransaction failed at height %d: %w", blk.Height(), err)
 	}
-	defer ws.Close()
+	if ws != nil {
+		defer ws.Close()
+	}
 
 	// merge state diffs from two layers:
 	// - accounts/destructs: from workingset collector (covers all actions incl. staking/reward)
