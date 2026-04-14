@@ -713,15 +713,20 @@ func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.Seale
 	}
 
 	reg := protocol.MustGetRegistry(ctx)
-	for _, act := range actions {
-		ctxWithActionContext, err := withActionCtx(ctx, act)
-		if err != nil {
-			return err
-		}
-		for _, p := range reg.All() {
-			if validator, ok := p.(protocol.ActionValidator); ok {
-				if err := validator.Validate(ctxWithActionContext, act.Envelope, ws); err != nil {
-					return err
+	// Skip action validation in Simulate mode (e.g. trace_debankBlock replay).
+	// Archive state may not match historical delegate data, causing PutPollResult
+	// validation failure for blocks where candidate info changed after the fact.
+	if !protocol.MustGetBlockCtx(ctx).Simulate {
+		for _, act := range actions {
+			ctxWithActionContext, err := withActionCtx(ctx, act)
+			if err != nil {
+				return err
+			}
+			for _, p := range reg.All() {
+				if validator, ok := p.(protocol.ActionValidator); ok {
+					if err := validator.Validate(ctxWithActionContext, act.Envelope, ws); err != nil {
+						return err
+					}
 				}
 			}
 		}
