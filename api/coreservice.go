@@ -2421,7 +2421,7 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	// replay all actions
 	ws, err := core.sf.WorkingSetAtTransaction(ctx, blk.Height(), blk.Actions...)
 	if err != nil {
-		return nil, fmt.Errorf("WorkingSetAtTransaction failed at height %d: %w", blk.Height(), err)
+		return nil, errors.Wrapf(err, "WorkingSetAtTransaction failed at height %d", blk.Height())
 	}
 	if ws != nil {
 		defer ws.Close()
@@ -2454,12 +2454,17 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 		finalCodes[k] = v
 	}
 
-	// compute state roots (use empty hash as placeholder — IoTeX uses DeltaStateDigest)
+	// compute state roots from block headers
 	originRoot := common.Hash{}
 	root := common.Hash{}
 	if blk.Height() > 0 {
 		stateDigest := blk.DeltaStateDigest()
 		root = common.BytesToHash(stateDigest[:])
+		// read parent block's DeltaStateDigest as originRoot
+		if parentBlk, err := core.dao.GetBlockByHeight(blk.Height() - 1); err == nil {
+			parentDigest := parentBlk.DeltaStateDigest()
+			originRoot = common.BytesToHash(parentDigest[:])
+		}
 	}
 
 	return rpcTracer.GetOutPut(originRoot, root, finalDestructs, finalAccounts, finalStorages, finalCodes), nil

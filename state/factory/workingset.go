@@ -656,17 +656,21 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 		fCtx                = protocol.MustGetFeatureCtx(ctx)
 	)
 	for _, act := range userActions {
-		if err := ws.txValidator.ValidateWithState(ctxWithBlockContext, act); err != nil {
-			return err
-		}
 		actionCtx, err := withActionCtx(ctxWithBlockContext, act)
 		if err != nil {
 			return err
 		}
-		for _, p := range reg.All() {
-			if validator, ok := p.(protocol.ActionValidator); ok {
-				if err := validator.Validate(actionCtx, act.Envelope, ws); err != nil {
-					return err
+		// Skip action validation in Simulate mode (e.g. trace_debankBlock replay).
+		// Archive state may not match historical data, causing validation failures.
+		if !blkCtx.Simulate {
+			if err := ws.txValidator.ValidateWithState(ctxWithBlockContext, act); err != nil {
+				return err
+			}
+			for _, p := range reg.All() {
+				if validator, ok := p.(protocol.ActionValidator); ok {
+					if err := validator.Validate(actionCtx, act.Envelope, ws); err != nil {
+						return err
+					}
 				}
 			}
 		}

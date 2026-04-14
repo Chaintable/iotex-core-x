@@ -1,3 +1,8 @@
+// Copyright (c) 2024 IoTeX Foundation
+// This source code is provided 'as is' and no warranties are given as to title or non-infringement, merchantability
+// or fitness for purpose and, to the extent permitted by law, all liability for your use of the code is disclaimed.
+// This source code is governed by Apache License 2.0 that can be found in the LICENSE file.
+
 package api
 
 import (
@@ -12,7 +17,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"go.uber.org/zap"
+
 	"github.com/iotexproject/iotex-core/v2/action"
+	"github.com/iotexproject/iotex-core/v2/pkg/log"
 	"github.com/iotexproject/iotex-core/v2/blockchain"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
@@ -139,6 +147,7 @@ func buildGenesisDebankOutput(g genesis.Genesis) (*ptypes.DebankOutPut, error) {
 		var err error
 		stateDiffBytes, err = util.EncodeToRlp(blockDiff)
 		if err != nil {
+			log.L().Warn("Failed to RLP encode genesis state diff", zap.Error(err))
 			stateDiffBytes = []byte{}
 		}
 	} else {
