@@ -19,7 +19,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/holiman/uint256"
 
 	// Force-load the tracer engines to trigger registration
 	_ "github.com/ethereum/go-ethereum/eth/tracers/js"
@@ -2432,6 +2434,13 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	// - storages/codes: from per-action EVM StateDiff merge
 	_, _, evmStorages, evmCodes := mergeStateDiffs(evmDiffs)
 
+	// Synthesize virtual accounts for protocol pools (rewarding, staking).
+	// IoTeX stores these balances in custom namespaces (RewardingNamespace,
+	// StakingNamespace) which are not captured by PipelineStateDiffCollector.
+	// Native eth_getBalance has special routing for these addresses; to make
+	// leafage return the same value, we write them as regular account diffs.
+	addProtocolPoolSyntheticAccounts(ctx, core.registry, ws, collector)
+
 	// use collector's accounts/destructs (covers non-EVM actions)
 	finalAccounts := collector.Accounts
 	finalDestructs := collector.Destructs
@@ -2468,4 +2477,89 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	}
 
 	return rpcTracer.GetOutPut(originRoot, root, finalDestructs, finalAccounts, finalStorages, finalCodes), nil
+}
+
+// addProtocolPoolSyntheticAccounts writes synthetic account entries for the
+// rewarding pool and staking bucket pool into the state diff collector.
+// These protocol pools have their balance stored in custom namespaces that are
+// not captured by the default collector. Native eth_getBalance special-cases
+// these addresses; to make leafage return the same value, we emit them as
+// regular account diffs in the pipeline.
+func addProtocolPoolSyntheticAccounts(
+	ctx context.Context,
+	registry *protocol.Registry,
+	ws protocol.StateReader,
+	collector *protocol.PipelineStateDiffCollector,
+) {
+	// Rewarding pool
+	if p, ok := registry.Find("rewarding"); ok {
+		if rp, ok := p.(*rewarding.Protocol); ok {
+			if balance, _, err := rp.TotalBalance(ctx, ws); err == nil && balance != nil {
+				ethAddr := common.BytesToAddress(address.RewardingProtocolAddrHash[:])
+				addSyntheticAccount(collector, ethAddr, balance)
+			}
+		}
+	}
+	// Staking pool
+	if p, ok := registry.Find("staking"); ok {
+		if sp, ok := p.(*staking.Protocol); ok {
+			if balance, err := readStakingTotalAmount(ctx, sp, ws); err == nil && balance != nil {
+				ethAddr := common.BytesToAddress(address.StakingProtocolAddrHash[:])
+				addSyntheticAccount(collector, ethAddr, balance)
+			}
+		}
+	}
+}
+
+func addSyntheticAccount(
+	collector *protocol.PipelineStateDiffCollector,
+	ethAddr common.Address,
+	balance *big.Int,
+) {
+	if collector == nil || balance == nil {
+		return
+	}
+	addrHash := crypto.Keccak256Hash(ethAddr[:])
+	gethAcc := types.StateAccount{
+		Nonce:    0,
+		Balance:  uint256.MustFromBig(balance),
+		Root:     types.EmptyRootHash,
+		CodeHash: crypto.Keccak256(nil),
+	}
+	collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
+	delete(collector.Destructs, addrHash)
+}
+
+func readStakingTotalAmount(
+	ctx context.Context,
+	sp *staking.Protocol,
+	ws protocol.StateReader,
+) (*big.Int, error) {
+	methodName, err := proto.Marshal(&iotexapi.ReadStakingDataMethod{
+		Method: iotexapi.ReadStakingDataMethod_TOTAL_STAKING_AMOUNT,
+	})
+	if err != nil {
+		return nil, err
+	}
+	arg, err := proto.Marshal(&iotexapi.ReadStakingDataRequest{
+		Request: &iotexapi.ReadStakingDataRequest_TotalStakingAmount_{
+			TotalStakingAmount: &iotexapi.ReadStakingDataRequest_TotalStakingAmount{},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	data, _, err := sp.ReadState(ctx, ws, methodName, arg)
+	if err != nil {
+		return nil, err
+	}
+	var meta iotextypes.AccountMeta
+	if err := proto.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	balance, ok := new(big.Int).SetString(meta.GetBalance(), 10)
+	if !ok {
+		return nil, errors.New("invalid staking total amount")
+	}
+	return balance, nil
 }
