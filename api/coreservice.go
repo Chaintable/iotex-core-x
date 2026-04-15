@@ -2491,22 +2491,37 @@ func addProtocolPoolSyntheticAccounts(
 	ws protocol.StateReader,
 	collector *protocol.PipelineStateDiffCollector,
 ) {
+	// Protocol state reads may panic on pre-Greenland blocks where legacy state
+	// formats have uninitialized fields. Protect the entire function: if we
+	// can't read the pool balance, skip the synthetic account (early blocks
+	// typically have zero pool balance anyway).
+	defer func() {
+		if r := recover(); r != nil {
+			log.L().Debug("recovered from panic in addProtocolPoolSyntheticAccounts", zap.Any("panic", r))
+		}
+	}()
 	// Rewarding pool
 	if p, ok := registry.Find("rewarding"); ok {
 		if rp, ok := p.(*rewarding.Protocol); ok {
-			if balance, _, err := rp.TotalBalance(ctx, ws); err == nil && balance != nil {
-				ethAddr := common.BytesToAddress(address.RewardingProtocolAddrHash[:])
-				addSyntheticAccount(collector, ethAddr, balance)
-			}
+			func() {
+				defer func() { _ = recover() }()
+				if balance, _, err := rp.TotalBalance(ctx, ws); err == nil && balance != nil {
+					ethAddr := common.BytesToAddress(address.RewardingProtocolAddrHash[:])
+					addSyntheticAccount(collector, ethAddr, balance)
+				}
+			}()
 		}
 	}
 	// Staking pool
 	if p, ok := registry.Find("staking"); ok {
 		if sp, ok := p.(*staking.Protocol); ok {
-			if balance, err := readStakingTotalAmount(ctx, sp, ws); err == nil && balance != nil {
-				ethAddr := common.BytesToAddress(address.StakingProtocolAddrHash[:])
-				addSyntheticAccount(collector, ethAddr, balance)
-			}
+			func() {
+				defer func() { _ = recover() }()
+				if balance, err := readStakingTotalAmount(ctx, sp, ws); err == nil && balance != nil {
+					ethAddr := common.BytesToAddress(address.StakingProtocolAddrHash[:])
+					addSyntheticAccount(collector, ethAddr, balance)
+				}
+			}()
 		}
 	}
 }
