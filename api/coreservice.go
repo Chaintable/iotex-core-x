@@ -2440,19 +2440,13 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	// Native eth_getBalance has special routing for these addresses; to make
 	// leafage return the same value, we write them as regular account diffs.
 	//
-	// Use WorkingSetAtHeight for the pool read rather than relying on the
-	// replay ws. WorkingSetAtTransaction's internal defer-recover returns
-	// (nil, nil) on panic (unnamed return values), so ws can be silently nil
-	// after a successful return. WorkingSetAtHeight also skips Process() /
-	// CreatePreStates, so the staking lazy view isn't triggered.
-	poolReadWS, poolErr := core.sf.WorkingSetAtHeight(ctx, blk.Height())
-	if poolErr == nil && poolReadWS != nil {
-		defer poolReadWS.Close()
-		addProtocolPoolSyntheticAccounts(ctx, core.registry, poolReadWS, collector)
-	} else {
-		log.L().Debug("failed to get pool read working set",
-			zap.Uint64("height", blk.Height()), zap.Error(poolErr))
-	}
+	// Read latest pool balance from the factory (legacy storage), matching
+	// how native eth_getBalance resolves these addresses. WorkingSetAtHeight
+	// on archive nodes is erigon-backed and lacks the v1 fund/bucket pool
+	// state, so it returns "empty string" unpack errors. Native also always
+	// reads latest (getProtocolAccount passes height="") rather than historical,
+	// so using the factory's current-height state is strictly consistent.
+	addProtocolPoolSyntheticAccounts(ctx, core.registry, core.sf, collector)
 
 	// use collector's accounts/destructs (covers non-EVM actions)
 	finalAccounts := collector.Accounts
