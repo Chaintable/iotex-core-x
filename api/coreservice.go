@@ -2497,32 +2497,64 @@ func addProtocolPoolSyntheticAccounts(
 	// typically have zero pool balance anyway).
 	defer func() {
 		if r := recover(); r != nil {
-			log.L().Debug("recovered from panic in addProtocolPoolSyntheticAccounts", zap.Any("panic", r))
+			log.L().Warn("recovered from panic in addProtocolPoolSyntheticAccounts", zap.Any("panic", r))
 		}
 	}()
 	// Rewarding pool
 	if p, ok := registry.Find("rewarding"); ok {
 		if rp, ok := p.(*rewarding.Protocol); ok {
 			func() {
-				defer func() { _ = recover() }()
-				if balance, _, err := rp.TotalBalance(ctx, ws); err == nil && balance != nil {
-					ethAddr := common.BytesToAddress(address.RewardingProtocolAddrHash[:])
-					addSyntheticAccount(collector, ethAddr, balance)
+				defer func() {
+					if r := recover(); r != nil {
+						log.L().Info("rewarding TotalBalance panicked", zap.Any("panic", r))
+					}
+				}()
+				balance, _, err := rp.TotalBalance(ctx, ws)
+				if err != nil {
+					log.L().Info("rewarding TotalBalance error", zap.Error(err))
+					return
 				}
+				if balance == nil {
+					log.L().Info("rewarding TotalBalance nil")
+					return
+				}
+				ethAddr := common.BytesToAddress(address.RewardingProtocolAddrHash[:])
+				addSyntheticAccount(collector, ethAddr, balance)
+				log.L().Info("added rewarding synthetic account", zap.String("balance", balance.String()))
 			}()
+		} else {
+			log.L().Warn("rewarding protocol type assertion failed")
 		}
+	} else {
+		log.L().Warn("rewarding protocol not found in registry")
 	}
 	// Staking pool
 	if p, ok := registry.Find("staking"); ok {
 		if sp, ok := p.(*staking.Protocol); ok {
 			func() {
-				defer func() { _ = recover() }()
-				if balance, err := readStakingTotalAmount(ctx, sp, ws); err == nil && balance != nil {
-					ethAddr := common.BytesToAddress(address.StakingProtocolAddrHash[:])
-					addSyntheticAccount(collector, ethAddr, balance)
+				defer func() {
+					if r := recover(); r != nil {
+						log.L().Info("staking readTotalAmount panicked", zap.Any("panic", r))
+					}
+				}()
+				balance, err := readStakingTotalAmount(ctx, sp, ws)
+				if err != nil {
+					log.L().Info("staking readTotalAmount error", zap.Error(err))
+					return
 				}
+				if balance == nil {
+					log.L().Info("staking readTotalAmount nil")
+					return
+				}
+				ethAddr := common.BytesToAddress(address.StakingProtocolAddrHash[:])
+				addSyntheticAccount(collector, ethAddr, balance)
+				log.L().Info("added staking synthetic account", zap.String("balance", balance.String()))
 			}()
+		} else {
+			log.L().Warn("staking protocol type assertion failed")
 		}
+	} else {
+		log.L().Warn("staking protocol not found in registry")
 	}
 }
 
