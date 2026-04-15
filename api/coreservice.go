@@ -2439,7 +2439,20 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	// StakingNamespace) which are not captured by PipelineStateDiffCollector.
 	// Native eth_getBalance has special routing for these addresses; to make
 	// leafage return the same value, we write them as regular account diffs.
-	addProtocolPoolSyntheticAccounts(ctx, core.registry, ws, collector)
+	//
+	// Use WorkingSetAtHeight for the pool read rather than relying on the
+	// replay ws. WorkingSetAtTransaction's internal defer-recover returns
+	// (nil, nil) on panic (unnamed return values), so ws can be silently nil
+	// after a successful return. WorkingSetAtHeight also skips Process() /
+	// CreatePreStates, so the staking lazy view isn't triggered.
+	poolReadWS, poolErr := core.sf.WorkingSetAtHeight(ctx, blk.Height())
+	if poolErr == nil && poolReadWS != nil {
+		defer poolReadWS.Close()
+		addProtocolPoolSyntheticAccounts(ctx, core.registry, poolReadWS, collector)
+	} else {
+		log.L().Debug("failed to get pool read working set",
+			zap.Uint64("height", blk.Height()), zap.Error(poolErr))
+	}
 
 	// use collector's accounts/destructs (covers non-EVM actions)
 	finalAccounts := collector.Accounts
