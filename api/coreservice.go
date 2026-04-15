@@ -2440,13 +2440,21 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	// Native eth_getBalance has special routing for these addresses; to make
 	// leafage return the same value, we write them as regular account diffs.
 	//
-	// Read latest pool balance from the factory (legacy storage), matching
-	// how native eth_getBalance resolves these addresses. WorkingSetAtHeight
-	// on archive nodes is erigon-backed and lacks the v1 fund/bucket pool
-	// state, so it returns "empty string" unpack errors. Native also always
-	// reads latest (getProtocolAccount passes height="") rather than historical,
-	// so using the factory's current-height state is strictly consistent.
-	addProtocolPoolSyntheticAccounts(ctx, core.registry, core.sf, collector)
+	// Read latest pool balance from the factory. Native always reads latest
+	// (getProtocolAccount passes height=""), not historical. Build a fresh
+	// ctx at tip height so FeatureCtx picks v2 storage — the rewarding fund
+	// was migrated from v1 to v2 at Greenland, so per-block ctx (with the
+	// archived block's FeatureCtx) would look in v1 which is now empty.
+	poolCtx, poolCtxErr := core.bc.Context(context.Background())
+	if poolCtxErr == nil {
+		tipHeight := core.bc.TipHeight()
+		poolCtx = protocol.WithBlockCtx(poolCtx, protocol.BlockCtx{BlockHeight: tipHeight})
+		poolCtx = protocol.WithRegistry(poolCtx, core.registry)
+		poolCtx = protocol.WithFeatureCtx(protocol.WithFeatureWithHeightCtx(poolCtx))
+		addProtocolPoolSyntheticAccounts(poolCtx, core.registry, core.sf, collector)
+	} else {
+		log.L().Debug("failed to build pool ctx", zap.Error(poolCtxErr))
+	}
 
 	// use collector's accounts/destructs (covers non-EVM actions)
 	finalAccounts := collector.Accounts
