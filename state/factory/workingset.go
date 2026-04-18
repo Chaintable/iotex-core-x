@@ -214,9 +214,19 @@ func (ws *workingSet) runAction(
 	if traceErr != nil {
 		log.L().Error("failed to start tracing EVM execution", zap.Error(traceErr))
 	}
+	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, actionHandler := range reg.All() {
 		receipt, err = actionHandler.Handle(ctx, selp.Envelope, ws)
 		if err != nil {
+			if blkCtx.Simulate && receipt == nil {
+				// In Simulate mode, a protocol handler (e.g. staking) may fail
+				// because ReadView returns nil on archive erigon state. If receipt
+				// is nil, this handler didn't claim the action — try the next one.
+				log.L().Debug("handler error in simulate mode, trying next",
+					zap.String("handler", actionHandler.Name()), zap.Error(err))
+				err = nil
+				continue
+			}
 			return nil, errors.Wrapf(
 				err,
 				"error when action %x mutates states",
