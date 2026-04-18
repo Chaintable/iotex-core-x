@@ -642,9 +642,18 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 		}
 	}
 	reg := protocol.MustGetRegistry(ctx)
+	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, p := range reg.All() {
 		if pp, ok := p.(protocol.PreStatesCreator); ok {
 			if err := pp.CreatePreStates(ctx, ws); err != nil {
+				if blkCtx.Simulate {
+					// In Simulate mode (trace_debankBlock), archive erigon state may
+					// lack protocol data (e.g. staking candidates). Skip the failing
+					// protocol's pre-states so EVM actions can still be replayed.
+					log.L().Debug("skipping CreatePreStates in simulate mode",
+						zap.String("protocol", p.Name()), zap.Error(err))
+					continue
+				}
 				return err
 			}
 		}
@@ -652,7 +661,6 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 	var (
 		receipts            = make([]*action.Receipt, 0)
 		ctxWithBlockContext = ctx
-		blkCtx              = protocol.MustGetBlockCtx(ctx)
 		fCtx                = protocol.MustGetFeatureCtx(ctx)
 	)
 	for _, act := range userActions {
@@ -735,9 +743,15 @@ func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.Seale
 			}
 		}
 	}
+	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, p := range reg.All() {
 		if pp, ok := p.(protocol.PreStatesCreator); ok {
 			if err := pp.CreatePreStates(ctx, ws); err != nil {
+				if blkCtx.Simulate {
+					log.L().Debug("skipping CreatePreStates in simulate mode",
+						zap.String("protocol", p.Name()), zap.Error(err))
+					continue
+				}
 				return err
 			}
 		}

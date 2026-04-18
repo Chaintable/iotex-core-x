@@ -282,7 +282,8 @@ func (sdb *stateDB) newReadOnlyWorkingSet(ctx context.Context, height uint64) (*
 	ws.views = protocol.NewLazyViews(func() protocol.Views {
 		views, err := sdb.registry.StartAll(ctx, ws)
 		if err != nil {
-			log.L().Panic("Failed to start all protocols for lazy views", zap.Error(err))
+			log.L().Error("Failed to start all protocols for lazy views", zap.Error(err))
+			return nil
 		}
 		return views
 	})
