@@ -684,6 +684,10 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 		}
 		receipt, err := ws.runAction(actionCtx, act)
 		if err != nil {
+			if blkCtx.Simulate {
+				log.L().Debug("skipping failed user action in simulate mode", zap.Error(err))
+				continue
+			}
 			return errors.Wrap(err, "error when run action")
 		}
 		receipts = append(receipts, receipt)
@@ -698,16 +702,27 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 	// Handle post system actions
 	if !protocol.MustGetFeatureCtx(ctx).PreStateSystemAction && !ignoreSystemValidation {
 		if err := ws.validatePostSystemActions(ctxWithBlockContext, systemActions); err != nil {
-			return err
+			if blkCtx.Simulate {
+				log.L().Debug("skipping system action validation in simulate mode", zap.Error(err))
+			} else {
+				return err
+			}
 		}
 	}
 	for _, act := range systemActions {
 		actionCtx, err := withActionCtx(ctxWithBlockContext, act)
 		if err != nil {
+			if blkCtx.Simulate {
+				continue
+			}
 			return err
 		}
 		receipt, err := ws.runAction(actionCtx, act)
 		if err != nil {
+			if blkCtx.Simulate {
+				log.L().Debug("skipping failed system action in simulate mode", zap.Error(err))
+				continue
+			}
 			return errors.Wrap(err, "error when run action")
 		}
 		receipts = append(receipts, receipt)
@@ -716,7 +731,14 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 		updateReceiptIndex(receipts)
 	}
 	ws.receipts = receipts
-	return ws.finalize(ctx)
+	if err := ws.finalize(ctx); err != nil {
+		if blkCtx.Simulate {
+			log.L().Debug("finalize failed in simulate mode (process)", zap.Error(err))
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.SealedEnvelope) error {
