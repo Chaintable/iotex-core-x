@@ -762,7 +762,14 @@ func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.Seale
 		return err
 	}
 	ws.receipts = receipts
-	return ws.finalize(ctx)
+	if err := ws.finalize(ctx); err != nil {
+		if blkCtx.Simulate {
+			log.L().Debug("finalize failed in simulate mode", zap.Error(err))
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (ws *workingSet) runActionsLegacy(
@@ -776,10 +783,21 @@ func (ws *workingSet) runActionsLegacy(
 	for _, elp := range elps {
 		ctxWithActionContext, err := withActionCtx(ctx, elp)
 		if err != nil {
+			if blkCtx.Simulate {
+				continue
+			}
 			return nil, err
 		}
 		receipt, err := ws.runAction(protocol.WithBlockCtx(ctxWithActionContext, blkCtx), elp)
 		if err != nil {
+			if blkCtx.Simulate {
+				// In Simulate mode (trace_debankBlock), some actions may fail
+				// due to missing protocol views on archive erigon state.
+				// Skip the failing action so remaining EVM actions can be traced.
+				log.L().Debug("skipping failed action in simulate mode",
+					zap.Error(err))
+				continue
+			}
 			return nil, errors.Wrap(err, "error when run action")
 		}
 		receipts = append(receipts, receipt)
