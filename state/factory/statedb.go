@@ -279,8 +279,13 @@ func (sdb *stateDB) newReadOnlyWorkingSet(ctx context.Context, height uint64) (*
 		}
 		ws.store = newErigonWorkingSetStoreForSimulate(e)
 	}
+	// Use sdb (stateDB) for protocol view initialization, not ws.
+	// When erigon is configured, ws.store has been replaced with erigon store.
+	// Protocol views (staking candidates, etc.) need to read from stateDB's
+	// KV store which has the data; erigon's historical changesets may be
+	// incomplete and return empty results for system contract queries.
 	ws.views = protocol.NewLazyViews(func() protocol.Views {
-		views, err := sdb.registry.StartAll(ctx, ws)
+		views, err := sdb.registry.StartAll(ctx, sdb)
 		if err != nil {
 			log.L().Error("Failed to start all protocols for lazy views", zap.Error(err))
 			return nil
