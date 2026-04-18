@@ -83,6 +83,8 @@ type (
 		txValidator            *protocol.GenericValidator
 		receipts               []*action.Receipt
 		stateDiffCollector     *protocol.PipelineStateDiffCollector
+		stateDiffEntries       []WriteQueueEntry // captured write queue for state diff broadcasting (v2.3.8 ioSwarm)
+		stateDiffDigest        []byte            // cached digest bytes for state diff callback (v2.3.8 ioSwarm)
 	}
 )
 
@@ -311,8 +313,29 @@ func (ws *workingSet) finalize(ctx context.Context) error {
 	if err := ws.store.Finalize(ctx); err != nil {
 		return err
 	}
+	// Capture write queue entries and digest for state diff broadcasting.
+	// Must happen after Finalize (which writes height) but before Commit (which flushes).
+	if sdbStore := ws.getStateDBStore(); sdbStore != nil {
+		ws.stateDiffEntries = sdbStore.CaptureWriteQueue()
+		d := sdbStore.Digest()
+		ws.stateDiffDigest = d[:]
+	}
 	ws.finalized = true
 
+	return nil
+}
+
+// getStateDBStore extracts the underlying *stateDBWorkingSetStore,
+// handling both direct and wrapped (workingSetStoreWithSecondary) cases.
+func (ws *workingSet) getStateDBStore() *stateDBWorkingSetStore {
+	if s, ok := ws.store.(*stateDBWorkingSetStore); ok {
+		return s
+	}
+	if s, ok := ws.store.(*workingSetStoreWithSecondary); ok {
+		if inner, ok := s.writer.(*stateDBWorkingSetStore); ok {
+			return inner
+		}
+	}
 	return nil
 }
 
