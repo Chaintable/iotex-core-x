@@ -1282,6 +1282,29 @@ func (stateDB *StateDBAdapter) StateDiff() (
 				codeHash := common.BytesToHash(inner.Account.CodeHash)
 				codes[codeHash] = common.CopyBytes(inner.code)
 			}
+		} else if erigonC, ok := c.(*contractErigon); ok {
+			// Erigon-backed contract (used in trace_debankBlock replay dryrun path)
+			if len(erigonC.committed) > 0 {
+				storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
+				for key := range erigonC.committed {
+					val, _ := erigonC.GetState(key)
+					slotHash := crypto.Keccak256Hash(key[:])
+					if len(val) > 0 && !isAllZero(val) {
+						encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
+						storageMap[slotHash] = encoded
+					} else {
+						storageMap[slotHash] = nil
+					}
+				}
+				storages[addrHash] = storageMap
+			}
+			if erigonC.dirtyCode {
+				code, _ := erigonC.GetCode()
+				if len(code) > 0 {
+					codeHash := common.BytesToHash(erigonC.Account.CodeHash)
+					codes[codeHash] = common.CopyBytes(code)
+				}
+			}
 		}
 		// account state (nonce, balance, root, codehash)
 		acc := c.SelfState()

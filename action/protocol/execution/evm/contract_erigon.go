@@ -20,14 +20,20 @@ type contractErigon struct {
 	intra *erigonstate.IntraBlockState
 	sr    protocol.StateReader
 	addr  hash.Hash160
+	// committed tracks slots modified during this action for pipeline state_diff collection.
+	// Populated by SetState, consumed by StateDBAdapter.StateDiff().
+	committed map[hash.Hash256]struct{}
+	// dirtyCode is true if SetCode was called (new contract deployment).
+	dirtyCode bool
 }
 
 func newContractErigon(addr hash.Hash160, account *state.Account, intra *erigonstate.IntraBlockState, sr protocol.StateReader) (Contract, error) {
 	c := &contractErigon{
-		Account: account,
-		intra:   intra,
-		addr:    addr,
-		sr:      sr,
+		Account:   account,
+		intra:     intra,
+		addr:      addr,
+		sr:        sr,
+		committed: make(map[hash.Hash256]struct{}),
 	}
 	return c, nil
 }
@@ -51,6 +57,7 @@ func (c *contractErigon) GetState(key hash.Hash256) ([]byte, error) {
 func (c *contractErigon) SetState(key hash.Hash256, value []byte) error {
 	k := libcommon.Hash(key)
 	c.intra.SetState(libcommon.Address(c.addr), &k, *uint256.MustFromBig(big.NewInt(0).SetBytes(value)))
+	c.committed[key] = struct{}{}
 	return nil
 }
 
@@ -60,6 +67,7 @@ func (c *contractErigon) GetCode() ([]byte, error) {
 
 func (c *contractErigon) SetCode(hash hash.Hash256, code []byte) {
 	c.intra.SetCode(libcommon.Address(c.addr), code)
+	c.dirtyCode = true
 }
 
 func (c *contractErigon) SelfState() *state.Account {
