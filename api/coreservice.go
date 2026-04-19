@@ -2478,30 +2478,16 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 		finalCodes[k] = v
 	}
 
-	// compute state roots from block headers.
-	// IoTeX's block.DeltaStateDigest() stores the pre-execution state hash
-	// (= parent block's post-execution state). So to match ETH semantics:
-	//   originRoot(N) = pre-state(N)  = blk.DeltaStateDigest()
-	//   root(N)       = post-state(N) = pre-state(N+1) = childBlk.DeltaStateDigest()
+	// compute state roots from block headers
 	originRoot := common.Hash{}
 	root := common.Hash{}
 	if blk.Height() > 0 {
-		preDigest := blk.DeltaStateDigest()
-		originRoot = common.BytesToHash(preDigest[:])
-		// DEBUG: compare blk.digest with dao-fetched same-height digest
-		if same, err := core.dao.GetBlockByHeight(blk.Height()); err == nil {
-			sameDigest := same.DeltaStateDigest()
-			if !bytes.Equal(preDigest[:], sameDigest[:]) {
-				log.L().Info("DEBUG blk.digest != dao.digest for same height",
-					zap.Uint64("height", blk.Height()),
-					zap.String("blk", hex.EncodeToString(preDigest[:])),
-					zap.String("dao", hex.EncodeToString(sameDigest[:])),
-				)
-			}
-		}
-		if childBlk, err := core.dao.GetBlockByHeight(blk.Height() + 1); err == nil {
-			childDigest := childBlk.DeltaStateDigest()
-			root = common.BytesToHash(childDigest[:])
+		stateDigest := blk.DeltaStateDigest()
+		root = common.BytesToHash(stateDigest[:])
+		// read parent block's DeltaStateDigest as originRoot
+		if parentBlk, err := core.dao.GetBlockByHeight(blk.Height() - 1); err == nil {
+			parentDigest := parentBlk.DeltaStateDigest()
+			originRoot = common.BytesToHash(parentDigest[:])
 		}
 	}
 
