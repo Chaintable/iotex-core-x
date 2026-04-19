@@ -2488,6 +2488,17 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 	if blk.Height() > 0 {
 		preDigest := blk.DeltaStateDigest()
 		originRoot = common.BytesToHash(preDigest[:])
+		// DEBUG: compare blk.digest with dao-fetched same-height digest
+		if same, err := core.dao.GetBlockByHeight(blk.Height()); err == nil {
+			sameDigest := same.DeltaStateDigest()
+			if !bytes.Equal(preDigest[:], sameDigest[:]) {
+				log.L().Info("DEBUG blk.digest != dao.digest for same height",
+					zap.Uint64("height", blk.Height()),
+					zap.String("blk", hex.EncodeToString(preDigest[:])),
+					zap.String("dao", hex.EncodeToString(sameDigest[:])),
+				)
+			}
+		}
 		if childBlk, err := core.dao.GetBlockByHeight(blk.Height() + 1); err == nil {
 			childDigest := childBlk.DeltaStateDigest()
 			root = common.BytesToHash(childDigest[:])
