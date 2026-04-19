@@ -1216,9 +1216,11 @@ func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.Pipeline
 			collector.Storages[addrHash] = storageMap
 		}
 	}
-	// code: dirtyCode means new contract deployment in this tx
+	// code: dirtyCode means new contract deployment in this tx.
+	// Use keccak256(code) — Account.CodeHash isn't updated until contract.Commit()
+	// runs, which happens AFTER this function.
 	if inner.dirtyCode && len(inner.code) > 0 {
-		codeHash := common.BytesToHash(inner.Account.CodeHash)
+		codeHash := crypto.Keccak256Hash(inner.code)
 		collector.Codes[codeHash] = common.CopyBytes(inner.code)
 	}
 }
@@ -1277,9 +1279,11 @@ func (stateDB *StateDBAdapter) StateDiff() (
 				}
 				storages[addrHash] = storageMap
 			}
-			// new code deployments
+			// new code deployments. Use keccak256(code) — Account.CodeHash is
+			// stale here because StateDiff() runs before CommitContracts()
+			// which is what updates Account.CodeHash.
 			if inner.dirtyCode && len(inner.code) > 0 {
-				codeHash := common.BytesToHash(inner.Account.CodeHash)
+				codeHash := crypto.Keccak256Hash(inner.code)
 				codes[codeHash] = common.CopyBytes(inner.code)
 			}
 		} else if erigonC, ok := c.(*contractErigon); ok {
@@ -1301,7 +1305,7 @@ func (stateDB *StateDBAdapter) StateDiff() (
 			if erigonC.dirtyCode {
 				code, _ := erigonC.GetCode()
 				if len(code) > 0 {
-					codeHash := common.BytesToHash(erigonC.Account.CodeHash)
+					codeHash := crypto.Keccak256Hash(code)
 					codes[codeHash] = common.CopyBytes(code)
 				}
 			}
