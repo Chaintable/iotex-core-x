@@ -318,9 +318,21 @@ func ExecuteContract(
 	}
 
 	// capture per-action EVM state diff before CommitContracts/clear wipes tracking data
-	if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil {
-		if adapter, ok := stateDB.(*StateDBAdapter); ok {
+	t, hasT := GetTracerCtx(ctx)
+	adapter, isAdapter := stateDB.(*StateDBAdapter)
+	log.L().Info("DEBUG CaptureStateDiff gate",
+		zap.Bool("has_tracer_ctx", hasT),
+		zap.Bool("has_capture_fn", hasT && t.CaptureStateDiff != nil),
+		zap.Bool("is_adapter", isAdapter),
+	)
+	if hasT && t.CaptureStateDiff != nil {
+		if isAdapter {
 			destructs, accts, stors, cds := adapter.StateDiff()
+			log.L().Info("DEBUG CaptureStateDiff invoked",
+				zap.Int("storages", len(stors)),
+				zap.Int("accounts", len(accts)),
+				zap.Int("codes", len(cds)),
+			)
 			t.CaptureStateDiff(destructs, accts, stors, cds)
 		}
 	}
