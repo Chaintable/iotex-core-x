@@ -2478,6 +2478,34 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 		finalCodes[k] = v
 	}
 
+	// DEBUG: trace storage emission path (remove after diagnosis)
+	evmSlotCnt := 0
+	for _, m := range evmStorages {
+		evmSlotCnt += len(m)
+	}
+	collectorSlotCnt := 0
+	for _, m := range collector.Storages {
+		collectorSlotCnt += len(m)
+	}
+	finalSlotCnt := 0
+	for _, m := range finalStorages {
+		finalSlotCnt += len(m)
+	}
+	log.L().Info("DebankBlock storage diagnosis",
+		zap.Uint64("height", blk.Height()),
+		zap.Int("evmDiffs_count", len(evmDiffs)),
+		zap.Int("evmStorages_addrs", len(evmStorages)),
+		zap.Int("evmStorages_slots", evmSlotCnt),
+		zap.Int("evmCodes", len(evmCodes)),
+		zap.Int("collector_storages_addrs", len(collector.Storages)),
+		zap.Int("collector_storages_slots", collectorSlotCnt),
+		zap.Int("collector_codes", len(collector.Codes)),
+		zap.Int("collector_accounts", len(collector.Accounts)),
+		zap.Int("finalStorages_addrs", len(finalStorages)),
+		zap.Int("finalStorages_slots", finalSlotCnt),
+		zap.Int("finalCodes", len(finalCodes)),
+	)
+
 	// compute state roots from block headers
 	originRoot := common.Hash{}
 	root := common.Hash{}
