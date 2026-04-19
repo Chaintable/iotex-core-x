@@ -551,6 +551,13 @@ func (ws *workingSet) collectAccountDiffOnDelete(cfg *protocol.StateConfig) {
 	if collector == nil || cfg.Namespace != AccountKVNamespace || len(cfg.Key) != len(hash.Hash160{}) {
 		return
 	}
+	// Only track destructs of actual accounts. Protocols (e.g. rewarding lazy
+	// migration in grantToAccount) delete their internal keys with LegacyKeyOption
+	// which defaults to AccountKVNamespace and a 20-byte hash160-of-protokey —
+	// those are not real account deletions and should not reach leafage as destructs.
+	if _, ok := cfg.Object.(*state.Account); !ok {
+		return
+	}
 	addrHash := crypto.Keccak256Hash(cfg.Key)
 	collector.Destructs[addrHash] = struct{}{}
 	delete(collector.Accounts, addrHash)

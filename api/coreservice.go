@@ -2478,16 +2478,19 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 		finalCodes[k] = v
 	}
 
-	// compute state roots from block headers
+	// compute state roots from block headers.
+	// IoTeX's block.DeltaStateDigest() stores the pre-execution state hash
+	// (= parent block's post-execution state). So to match ETH semantics:
+	//   originRoot(N) = pre-state(N)  = blk.DeltaStateDigest()
+	//   root(N)       = post-state(N) = pre-state(N+1) = childBlk.DeltaStateDigest()
 	originRoot := common.Hash{}
 	root := common.Hash{}
 	if blk.Height() > 0 {
-		stateDigest := blk.DeltaStateDigest()
-		root = common.BytesToHash(stateDigest[:])
-		// read parent block's DeltaStateDigest as originRoot
-		if parentBlk, err := core.dao.GetBlockByHeight(blk.Height() - 1); err == nil {
-			parentDigest := parentBlk.DeltaStateDigest()
-			originRoot = common.BytesToHash(parentDigest[:])
+		preDigest := blk.DeltaStateDigest()
+		originRoot = common.BytesToHash(preDigest[:])
+		if childBlk, err := core.dao.GetBlockByHeight(blk.Height() + 1); err == nil {
+			childDigest := childBlk.DeltaStateDigest()
+			root = common.BytesToHash(childDigest[:])
 		}
 	}
 
