@@ -7,7 +7,6 @@ package factory
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 	"sort"
@@ -553,11 +552,6 @@ func (ws *workingSet) collectAccountDiffOnDelete(cfg *protocol.StateConfig) {
 		return
 	}
 	addrHash := crypto.Keccak256Hash(cfg.Key)
-	log.L().Info("DEBUG account destruct",
-		zap.Uint64("height", ws.height),
-		zap.String("key_hex", hex.EncodeToString(cfg.Key)),
-		zap.String("addr_hash", hex.EncodeToString(addrHash[:])),
-	)
 	collector.Destructs[addrHash] = struct{}{}
 	delete(collector.Accounts, addrHash)
 	delete(collector.Storages, addrHash)
