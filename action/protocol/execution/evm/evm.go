@@ -330,12 +330,6 @@ func ExecuteContract(
 	}
 	if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil && adapter != nil {
 		destructs, accts, stors, cds := adapter.StateDiff()
-		log.L().Info("DEBUG StateDiff result",
-			zap.Int("storages_addrs", len(stors)),
-			zap.Int("accounts", len(accts)),
-			zap.Int("codes", len(cds)),
-			zap.Int("destructs", len(destructs)),
-		)
 		t.CaptureStateDiff(destructs, accts, stors, cds)
 	}
 	if err := stateDB.CommitContracts(); err != nil {
