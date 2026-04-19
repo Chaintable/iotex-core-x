@@ -82,7 +82,15 @@ func TraceStart(ctx context.Context, ws protocol.StateManager, elp action.Envelo
 			return errors.Wrap(err, "failed to get eth compatible action data")
 		}
 	default:
-		return errors.New("only eth compatible action is supported for tracing")
+		// Non-eth-compatible action (e.g. PutPollResult). Still advance the
+		// tracer's currentIdx via CaptureTxStart/CaptureTxEnd so that the next
+		// eth-compatible action in the same block sees the correct envelope at
+		// actions[currentIdx]. Without this, the tracer/idx desync causes the
+		// subsequent eth action's ToEthTx to read the wrong envelope and the
+		// tx is silently dropped from block_file.txs.
+		vmCtx.Tracer.CaptureTxStart(elp.Gas())
+		vmCtx.Tracer.CaptureTxEnd(elp.Gas())
+		return nil
 	}
 	vmCtx.Tracer.CaptureTxStart(elp.Gas())
 	if _, isExecution := elp.Action().(*action.Execution); isExecution {
