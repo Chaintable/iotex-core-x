@@ -317,24 +317,26 @@ func ExecuteContract(
 		}
 	}
 
-	// capture per-action EVM state diff before CommitContracts/clear wipes tracking data
-	t, hasT := GetTracerCtx(ctx)
-	adapter, isAdapter := stateDB.(*StateDBAdapter)
-	log.L().Info("DEBUG CaptureStateDiff gate",
-		zap.Bool("has_tracer_ctx", hasT),
-		zap.Bool("has_capture_fn", hasT && t.CaptureStateDiff != nil),
-		zap.Bool("is_adapter", isAdapter),
-	)
-	if hasT && t.CaptureStateDiff != nil {
-		if isAdapter {
-			destructs, accts, stors, cds := adapter.StateDiff()
-			log.L().Info("DEBUG CaptureStateDiff invoked",
-				zap.Int("storages", len(stors)),
-				zap.Int("accounts", len(accts)),
-				zap.Int("codes", len(cds)),
-			)
-			t.CaptureStateDiff(destructs, accts, stors, cds)
-		}
+	// capture per-action EVM state diff before CommitContracts/clear wipes tracking data.
+	// Unwrap through ErigonStateDBAdapter/Dryrun wrappers to reach the inner StateDBAdapter.
+	var adapter *StateDBAdapter
+	switch s := stateDB.(type) {
+	case *StateDBAdapter:
+		adapter = s
+	case *ErigonStateDBAdapter:
+		adapter = s.StateDBAdapter
+	case *ErigonStateDBAdapterDryrun:
+		adapter = s.ErigonStateDBAdapter.StateDBAdapter
+	}
+	if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil && adapter != nil {
+		destructs, accts, stors, cds := adapter.StateDiff()
+		log.L().Info("DEBUG StateDiff result",
+			zap.Int("storages_addrs", len(stors)),
+			zap.Int("accounts", len(accts)),
+			zap.Int("codes", len(cds)),
+			zap.Int("destructs", len(destructs)),
+		)
+		t.CaptureStateDiff(destructs, accts, stors, cds)
 	}
 	if err := stateDB.CommitContracts(); err != nil {
 		return nil, nil, errors.Wrap(err, "failed to commit contracts to underlying db")
