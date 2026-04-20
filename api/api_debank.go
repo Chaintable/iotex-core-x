@@ -226,15 +226,29 @@ func convertActionReceiptToGethReceipt(receipt *action.Receipt, selp *action.Sea
 // CLAIM_FROM_REWARDING, GAS_FEE, BUCKET_CREATE_AMOUNT, etc.) that are native
 // IoTeX constructs, not EVM LOG opcodes.
 func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt) {
-	if receipt == nil || len(receipt.TransactionLogs()) == 0 {
+	if receipt == nil {
+		log.L().Info("DEBUG emitTransferLogsAsEvents: nil receipt")
+		return
+	}
+	tlogCount := len(receipt.TransactionLogs())
+	log.L().Info("DEBUG emitTransferLogsAsEvents",
+		zap.Uint64("height", receipt.BlockHeight),
+		zap.Int("tlog_count", tlogCount),
+		zap.Uint32("status", uint32(receipt.Status)),
+	)
+	if tlogCount == 0 {
 		return
 	}
 	// address.RewardingProtocol is the standard iotex-compat bech32 used by
 	// eth_getTransactionReceipt for the emitter of transfer-style logs.
 	transferLogs, err := receipt.TransferLogs(iotexAddress.RewardingProtocol, 0)
 	if err != nil {
+		log.L().Info("DEBUG emitTransferLogsAsEvents TransferLogs err", zap.Error(err))
 		return
 	}
+	log.L().Info("DEBUG emitTransferLogsAsEvents emitting",
+		zap.Int("n", len(transferLogs)),
+	)
 	for _, l := range transferLogs {
 		ethLog := &types.Log{
 			Data:        l.Data,
