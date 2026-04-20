@@ -93,10 +93,17 @@ func (c *contractErigon) Iterator() (trie.Iterator, error) {
 }
 
 func (c *contractErigon) Snapshot() Contract {
+	// Copy committed entries so state_diff tracking survives revert/snapshot.
+	committed := make(map[hash.Hash256]struct{}, len(c.committed))
+	for k := range c.committed {
+		committed[k] = struct{}{}
+	}
 	return &contractErigon{
-		Account: c.Account.Clone(),
-		intra:   c.intra,
-		addr:    c.addr,
-		sr:      c.sr,
+		Account:   c.Account.Clone(),
+		intra:     c.intra,
+		addr:      c.addr,
+		sr:        c.sr,
+		committed: committed,
+		dirtyCode: c.dirtyCode,
 	}
 }
