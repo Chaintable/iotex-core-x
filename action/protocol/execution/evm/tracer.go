@@ -110,6 +110,11 @@ func TraceEnd(ctx context.Context, ws protocol.StateManager, elp action.Envelope
 	}
 	output := receipt.Output
 	vmCtx.Tracer.CaptureEnd(output, receipt.GasConsumed, nil)
+	// Emit native TransactionLogs before CaptureTxEnd so they land in callstack[top].Logs
+	// and get picked up by the tracer's addTraceAndLog during OnTxEnd.
+	if t, ok := GetTracerCtx(ctx); ok && t.EmitTransferLogs != nil {
+		t.EmitTransferLogs(receipt)
+	}
 	vmCtx.Tracer.CaptureTxEnd(elp.Gas() - receipt.GasConsumed)
 	if t, ok := GetTracerCtx(ctx); ok && t.CaptureTx != nil {
 		t.CaptureTx(output, receipt)

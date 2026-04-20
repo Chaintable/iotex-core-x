@@ -2401,12 +2401,14 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 				gethReceipt := convertActionReceiptToGethReceipt(receipt, selp)
 				if gethReceipt != nil {
 					gethReceipt.TransactionIndex = uint(idx)
-					// Emit native TransactionLogs (pool deposit/grant/claim flows) to events
-					// before OnTxEnd so they appear in the same tx block as the action.
-					emitTransferLogsAsEvents(rpcTracer, receipt)
 					rpcTracer.OnTxEnd(gethReceipt, nil)
 				}
 			}
+		},
+		// EmitTransferLogs fires BEFORE CaptureTxEnd so the logs get into callstack[top].Logs
+		// and are picked up by callTracer.addTraceAndLog when OnTxEnd runs.
+		EmitTransferLogs: func(receipt *action.Receipt) {
+			emitTransferLogsAsEvents(rpcTracer, receipt)
 		},
 		CaptureStateDiff: func(destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte) {
 			evmDiffs = append(evmDiffs, perActionStateDiff{

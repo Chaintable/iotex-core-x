@@ -33,6 +33,11 @@ type (
 		)
 		// OnLog is called when a log is emitted during EVM execution (for trace_debankBlock events).
 		OnLog func(*types.Log)
+		// EmitTransferLogs is called after CaptureEnd but before CaptureTxEnd so that
+		// native IoTeX TransactionLogs (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE,
+		// BUCKET_CREATE_AMOUNT, etc.) can be pushed as events and included in the
+		// tracer's addTraceAndLog pass.
+		EmitTransferLogs func(*action.Receipt)
 	}
 )
 
