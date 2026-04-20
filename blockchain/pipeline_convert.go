@@ -114,28 +114,6 @@ func ConvertToGethReceipt(receipt *action.Receipt) *types.Receipt {
 		}
 		r.Logs = append(r.Logs, ethLog)
 	}
-	// Append native TransactionLogs (system transfers: GRANT_REWARD, CLAIM_FROM_REWARDING,
-	// GAS_FEE, BUCKET_CREATE_AMOUNT, etc.) so the pipeline path exposes pool flows that
-	// are not encoded as EVM logs. Mirrors eth_getTransactionReceipt's behavior.
-	transferLogs, err := receipt.TransferLogs(address.RewardingProtocol, uint32(len(r.Logs)))
-	if err == nil {
-		for _, l := range transferLogs {
-			ethLog := &types.Log{
-				Data:        l.Data,
-				BlockNumber: l.BlockHeight,
-				TxHash:      common.BytesToHash(l.ActionHash[:]),
-				TxIndex:     uint(l.TxIndex),
-				Index:       uint(l.Index),
-			}
-			if addr, err := address.FromString(l.Address); err == nil {
-				ethLog.Address = common.BytesToAddress(addr.Bytes())
-			}
-			for _, topic := range l.Topics {
-				ethLog.Topics = append(ethLog.Topics, common.BytesToHash(topic[:]))
-			}
-			r.Logs = append(r.Logs, ethLog)
-		}
-	}
 	return r
 }
 

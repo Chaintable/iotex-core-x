@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"go.uber.org/zap"
 
+	iotexAddress "github.com/iotexproject/iotex-address/address"
 	"github.com/iotexproject/iotex-core/v2/action"
 	"github.com/iotexproject/iotex-core/v2/pkg/log"
 	"github.com/iotexproject/iotex-core/v2/blockchain"
@@ -217,4 +218,36 @@ func convertActionReceiptToGethReceipt(receipt *action.Receipt, selp *action.Sea
 		gethReceipt.TxHash = ethTx.Hash()
 	}
 	return gethReceipt
+}
+
+// emitTransferLogsAsEvents converts each TransactionLog in the receipt into an
+// eth types.Log and pushes it through the tracer's log emission path so it
+// appears in block_file.events. This surfaces pool flows (GRANT_REWARD,
+// CLAIM_FROM_REWARDING, GAS_FEE, BUCKET_CREATE_AMOUNT, etc.) that are native
+// IoTeX constructs, not EVM LOG opcodes.
+func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt) {
+	if receipt == nil || len(receipt.TransactionLogs()) == 0 {
+		return
+	}
+	// address.RewardingProtocol is the standard iotex-compat bech32 used by
+	// eth_getTransactionReceipt for the emitter of transfer-style logs.
+	transferLogs, err := receipt.TransferLogs(iotexAddress.RewardingProtocol, 0)
+	if err != nil {
+		return
+	}
+	for _, l := range transferLogs {
+		ethLog := &types.Log{
+			Data:        l.Data,
+			BlockNumber: l.BlockHeight,
+			TxHash:      common.BytesToHash(l.ActionHash[:]),
+			TxIndex:     uint(l.TxIndex),
+		}
+		if addr, err := iotexAddress.FromString(l.Address); err == nil {
+			ethLog.Address = common.BytesToAddress(addr.Bytes())
+		}
+		for _, topic := range l.Topics {
+			ethLog.Topics = append(ethLog.Topics, common.BytesToHash(topic[:]))
+		}
+		rpcTracer.EmitTransferLog(ethLog)
+	}
 }

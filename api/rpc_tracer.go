@@ -158,3 +158,13 @@ func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	t.logIndex++
 	t.inner.OnLog(l)
 }
+
+// EmitTransferLog bypasses the captureStarted gate to emit a log converted
+// from a native TransactionLog (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE,
+// BUCKET_CREATE_AMOUNT, etc.). Called from the CaptureTx callback so non-EVM
+// actions can still expose their pool flows as events.
+func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
+	l.Index = t.logIndex
+	t.logIndex++
+	t.inner.OnLog(l)
+}
