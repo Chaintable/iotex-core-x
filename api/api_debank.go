@@ -227,28 +227,36 @@ func convertActionReceiptToGethReceipt(receipt *action.Receipt, selp *action.Sea
 // IoTeX constructs, not EVM LOG opcodes.
 func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt) {
 	if receipt == nil {
-		log.L().Info("DEBUG emitTransferLogsAsEvents: nil receipt")
 		return
 	}
-	tlogCount := len(receipt.TransactionLogs())
-	log.L().Info("DEBUG emitTransferLogsAsEvents",
-		zap.Uint64("height", receipt.BlockHeight),
-		zap.Int("tlog_count", tlogCount),
-		zap.Uint32("status", uint32(receipt.Status)),
-	)
-	if tlogCount == 0 {
+	// 1. Emit receipt.Logs() (e.g. GrantBlockReward's rewardLog). For non-Execution
+	// actions these never reached the tracer through OnLog, so they'd otherwise
+	// be dropped from block_file.events.
+	for _, l := range receipt.Logs() {
+		ethLog := &types.Log{
+			Data:        l.Data,
+			BlockNumber: l.BlockHeight,
+			TxHash:      common.BytesToHash(l.ActionHash[:]),
+			TxIndex:     uint(l.TxIndex),
+		}
+		if addr, err := iotexAddress.FromString(l.Address); err == nil {
+			ethLog.Address = common.BytesToAddress(addr.Bytes())
+		}
+		for _, topic := range l.Topics {
+			ethLog.Topics = append(ethLog.Topics, common.BytesToHash(topic[:]))
+		}
+		rpcTracer.EmitTransferLog(ethLog)
+	}
+	// 2. Emit native TransactionLogs (GAS_FEE, GRANT_REWARD, CLAIM, etc.) as
+	// synthetic logs — mirrors eth_getTransactionReceipt behavior so ETL can
+	// see pool flows.
+	if len(receipt.TransactionLogs()) == 0 {
 		return
 	}
-	// address.RewardingProtocol is the standard iotex-compat bech32 used by
-	// eth_getTransactionReceipt for the emitter of transfer-style logs.
 	transferLogs, err := receipt.TransferLogs(iotexAddress.RewardingProtocol, 0)
 	if err != nil {
-		log.L().Info("DEBUG emitTransferLogsAsEvents TransferLogs err", zap.Error(err))
 		return
 	}
-	log.L().Info("DEBUG emitTransferLogsAsEvents emitting",
-		zap.Int("n", len(transferLogs)),
-	)
 	for _, l := range transferLogs {
 		ethLog := &types.Log{
 			Data:        l.Data,

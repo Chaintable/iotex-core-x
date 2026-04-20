@@ -110,10 +110,14 @@ func TraceEnd(ctx context.Context, ws protocol.StateManager, elp action.Envelope
 	}
 	output := receipt.Output
 	vmCtx.Tracer.CaptureEnd(output, receipt.GasConsumed, nil)
-	// Emit native TransactionLogs before CaptureTxEnd so they land in callstack[top].Logs
-	// and get picked up by the tracer's addTraceAndLog during OnTxEnd.
-	if t, ok := GetTracerCtx(ctx); ok && t.EmitTransferLogs != nil {
-		t.EmitTransferLogs(receipt)
+	// For non-Execution actions the handler does not go through EVM, so its
+	// receipt.Logs() and TransactionLogs() never reached the tracer via OnLog.
+	// Emit them explicitly here (before CaptureTxEnd) so addTraceAndLog
+	// includes them in BlockFile.Events.
+	if _, isExecution := elp.Action().(*action.Execution); !isExecution {
+		if t, ok := GetTracerCtx(ctx); ok && t.EmitTransferLogs != nil {
+			t.EmitTransferLogs(receipt)
+		}
 	}
 	vmCtx.Tracer.CaptureTxEnd(elp.Gas() - receipt.GasConsumed)
 	if t, ok := GetTracerCtx(ctx); ok && t.CaptureTx != nil {
