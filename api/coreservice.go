@@ -195,6 +195,10 @@ type (
 		BlobSidecarsByHeight(height uint64) ([]*apitypes.BlobSidecarResult, error)
 		// DebankBlock returns trace_debankBlock output for a given block height
 		DebankBlock(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error)
+		// DebankBlockWithDebug is like DebankBlock but emits [DEBANK_DBG] log lines
+		// at PipelineStateDiffCollector PUT / CommitContracts overwrite points for
+		// investigating state_diff sender-balance drift.
+		DebankBlockWithDebug(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error)
 		// TraceBlockByNumber returns the trace result of a block by its height
 		TraceBlockByNumber(ctx context.Context, height uint64, config *tracers.TraceConfig) ([][]byte, []*action.Receipt, any, error)
 		//  TraceBlockByHash returns the trace result of a block by its hash
@@ -2344,6 +2348,17 @@ func filterReceipts(receipts []*action.Receipt, actHash hash.Hash256) *action.Re
 
 // DebankBlock replays a block and returns trace_debankBlock output.
 func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error) {
+	return core.debankBlockImpl(ctx, height, false)
+}
+
+// DebankBlockWithDebug is like DebankBlock but emits [DEBANK_DBG] log lines
+// at every sm.PutState(Account) and at the CommitContracts EOA-overwrite path.
+// Use for investigating state_diff sender-balance drift.
+func (core *coreService) DebankBlockWithDebug(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error) {
+	return core.debankBlockImpl(ctx, height, true)
+}
+
+func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, debug bool) (*ptypes.DebankOutPut, error) {
 	g := core.bc.Genesis()
 
 	// genesis block: special case
@@ -2423,7 +2438,11 @@ func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptype
 
 	// set up workingset-level state diff collector for non-EVM action balance changes
 	collector := protocol.NewPipelineStateDiffCollector()
+	collector.Debug = debug
 	ctx = protocol.WithStateDiffCollectorCtx(ctx, collector)
+	if debug {
+		log.L().Info("[DEBANK_DBG] trace_debankBlock debug mode enabled", zap.Uint64("height", height))
+	}
 
 	// replay all actions
 	ws, err := core.sf.WorkingSetAtTransaction(ctx, blk.Height(), blk.Actions...)

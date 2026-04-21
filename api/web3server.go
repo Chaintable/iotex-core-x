@@ -261,6 +261,8 @@ func (svr *web3Handler) handleWeb3Req(ctx context.Context, web3Req *gjson.Result
 		res, err = svr.getBlobSidecars(web3Req)
 	case "trace_debankBlock":
 		res, err = svr.debankBlock(ctx, web3Req)
+	case "trace_debankBlockWithDebug":
+		res, err = svr.debankBlockWithDebug(ctx, web3Req)
 	case "debug_traceTransaction":
 		res, err = svr.traceTransaction(ctx, web3Req)
 	case "debug_traceCall":
@@ -1377,6 +1379,24 @@ func (svr *web3Handler) debankBlock(ctx context.Context, in *gjson.Result) (any,
 		height = 0
 	}
 	return svr.coreService.DebankBlock(ctx, height)
+}
+
+func (svr *web3Handler) debankBlockWithDebug(ctx context.Context, in *gjson.Result) (any, error) {
+	blkParam := in.Get("params.0")
+	blkNum, err := parseBlockNumberOrHash(&blkParam)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse block number")
+	}
+	height, isExact, err := svr.blockNumberOrHashToHeight(blkNum)
+	if err != nil {
+		return nil, err
+	}
+	if !isExact {
+		height = svr.coreService.TipHeight()
+	} else if blkNum.BlockNumber != nil && *blkNum.BlockNumber == rpc.EarliestBlockNumber {
+		height = 0
+	}
+	return svr.coreService.DebankBlockWithDebug(ctx, height)
 }
 
 func (svr *web3Handler) traceBlockByNumber(ctx context.Context, in *gjson.Result) (any, error) {

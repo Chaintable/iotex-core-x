@@ -457,6 +457,10 @@ type PipelineStateDiffCollector struct {
 	Accounts  map[common.Hash][]byte
 	Storages  map[common.Hash]map[common.Hash][]byte
 	Codes     map[common.Hash][]byte
+	// Debug enables trace_debankBlock debug logging for sender-balance bug investigation.
+	// Emits [DEBANK_DBG] log lines at every sm.PutState(Account) and at the CommitContracts
+	// EOA overwrite path.
+	Debug bool
 }
 
 // NewPipelineStateDiffCollector creates a new collector with initialized maps

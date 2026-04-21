@@ -1147,6 +1147,10 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 				CodeHash: acc.CodeHash,
 			}
 			collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
+			if collector.Debug {
+				log.S().Infof("[DEBANK_DBG] COMMIT_EOA_OVERWRITE addr=%x bal=%s nonce=%d (reads sm via accountState)",
+					addr[:], acc.Balance.String(), acc.PendingNonce())
+			}
 		}
 	}
 	// delete suicided accounts/contract

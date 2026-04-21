@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"runtime"
 	"sort"
 	"time"
 
@@ -544,6 +545,37 @@ func (ws *workingSet) collectAccountDiffOnPut(cfg *protocol.StateConfig, s inter
 	}
 	collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
 	delete(collector.Destructs, addrHash)
+	if collector.Debug {
+		log.S().Infof("[DEBANK_DBG] PUT_ACCOUNT addr=%x bal=%s nonce=%d caller=%s",
+			cfg.Key, balance.String(), acc.PendingNonce(), debankDbgCaller(4))
+	}
+}
+
+// debankDbgCaller returns a short "file:line" trace for the N-th frame above the call site.
+// Used only when PipelineStateDiffCollector.Debug is true.
+func debankDbgCaller(skip int) string {
+	pcs := make([]uintptr, 6)
+	n := runtime.Callers(skip, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var out string
+	for i := 0; i < 4; i++ {
+		f, more := frames.Next()
+		out += fmt.Sprintf("%s:%d ", trimFuncName(f.Function), f.Line)
+		if !more {
+			break
+		}
+	}
+	return out
+}
+
+func trimFuncName(name string) string {
+	// strip package path, keep last "pkg.Func" segment
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			return name[i+1:]
+		}
+	}
+	return name
 }
 
 func (ws *workingSet) collectAccountDiffOnDelete(cfg *protocol.StateConfig) {
