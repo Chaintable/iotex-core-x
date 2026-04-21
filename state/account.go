@@ -210,6 +210,15 @@ func (st *Account) PendingNonceConsideringFreshAccount() uint64 {
 	return st.PendingNonce()
 }
 
+// TxCount returns the number of transactions sent from the account in Ethereum
+// semantics (0-based). IoTeX's legacy accounts (type 0) use 1-based PendingNonce,
+// but the underlying st.nonce is always equal to the actual tx count for both
+// account types, so we expose it directly for consumers that need the
+// Ethereum-style StateAccount.Nonce field.
+func (st *Account) TxCount() uint64 {
+	return st.nonce
+}
+
 // MarkAsCandidate marks the account as a candidate
 func (st *Account) MarkAsCandidate() {
 	st.isCandidate = true

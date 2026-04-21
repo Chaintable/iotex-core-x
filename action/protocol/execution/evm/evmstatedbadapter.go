@@ -1159,7 +1159,7 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 			}
 			addrHash := crypto.Keccak256Hash(addr[:])
 			gethAcc := types.StateAccount{
-				Nonce:    acc.PendingNonce(),
+				Nonce:    acc.TxCount(),
 				Balance:  uint256.MustFromBig(acc.Balance),
 				Root:     common.BytesToHash(acc.Root[:]),
 				CodeHash: acc.CodeHash,
@@ -1167,7 +1167,7 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 			collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
 			if collector.Debug {
 				log.S().Infof("[DEBANK_DBG] COMMIT_EOA_OVERWRITE addr=%x bal=%s nonce=%d (reads sm via accountState)",
-					addr[:], acc.Balance.String(), acc.PendingNonce())
+					addr[:], acc.Balance.String(), acc.TxCount())
 			}
 		}
 	}
@@ -1251,7 +1251,7 @@ func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.Pipeline
 func (stateDB *StateDBAdapter) collectAccountState(collector *protocol.PipelineStateDiffCollector, addr common.Address, c Contract) {
 	acc := c.SelfState()
 	gethAcc := types.StateAccount{
-		Nonce:    acc.PendingNonce(),
+		Nonce:    acc.TxCount(),
 		Balance:  uint256.MustFromBig(acc.Balance),
 		Root:     common.BytesToHash(acc.Root[:]),
 		CodeHash: acc.CodeHash,
@@ -1335,7 +1335,7 @@ func (stateDB *StateDBAdapter) StateDiff() (
 		// account state (nonce, balance, root, codehash)
 		acc := c.SelfState()
 		gethAcc := types.StateAccount{
-			Nonce:    acc.PendingNonce(),
+			Nonce:    acc.TxCount(),
 			Balance:  uint256.MustFromBig(acc.Balance),
 			Root:     common.BytesToHash(acc.Root[:]),
 			CodeHash: acc.CodeHash,
@@ -1354,7 +1354,7 @@ func (stateDB *StateDBAdapter) StateDiff() (
 			continue
 		}
 		gethAcc := types.StateAccount{
-			Nonce:    acc.PendingNonce(),
+			Nonce:    acc.TxCount(),
 			Balance:  uint256.MustFromBig(acc.Balance),
 			Root:     common.BytesToHash(acc.Root[:]),
 			CodeHash: acc.CodeHash,

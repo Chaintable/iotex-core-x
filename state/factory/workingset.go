@@ -538,7 +538,7 @@ func (ws *workingSet) collectAccountDiffOnPut(cfg *protocol.StateConfig, s inter
 	}
 	addrHash := crypto.Keccak256Hash(cfg.Key)
 	gethAcc := types.StateAccount{
-		Nonce:    acc.PendingNonce(),
+		Nonce:    acc.TxCount(),
 		Balance:  uint256.MustFromBig(balance),
 		Root:     common.BytesToHash(acc.Root[:]),
 		CodeHash: common.CopyBytes(acc.CodeHash),
