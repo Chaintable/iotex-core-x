@@ -538,7 +538,11 @@ func (ws *workingSet) collectAccountDiffOnPut(cfg *protocol.StateConfig, s inter
 	}
 	addrHash := crypto.Keccak256Hash(cfg.Key)
 	gethAcc := types.StateAccount{
-		Nonce:    acc.TxCount(),
+		// Align with iotex eth_getTransactionCount, which returns
+		// PendingNonceConsideringFreshAccount (see coreservice_with_height.go:76).
+		// This correctly handles fresh legacy accounts (returns 0 instead of 1)
+		// while still matching PendingNonce for all other cases.
+		Nonce:    acc.PendingNonceConsideringFreshAccount(),
 		Balance:  uint256.MustFromBig(balance),
 		Root:     common.BytesToHash(acc.Root[:]),
 		CodeHash: common.CopyBytes(acc.CodeHash),
