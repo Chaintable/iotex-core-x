@@ -869,6 +869,16 @@ func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
 		log.S().Infof("[DEBANK_DBG] STATEDB_ADDLOG addr=%s topic0=%s ntopics=%d data_len=%d",
 			evmLog.Address.Hex(), topic0, len(evmLog.Topics), len(evmLog.Data))
 	}
+	// Unconditional probe: always log AddLog calls for the IIP-13 staking contract
+	// (has no EVM code but appears in receipt.Logs()). Used to discover the caller
+	// path in production mint. Remove once debug is done.
+	if evmLog.Address.Hex() == "0xCCD3d8863D241BcC80f46302310a6d942A90e851" {
+		topic0 := "(none)"
+		if len(evmLog.Topics) > 0 {
+			topic0 = evmLog.Topics[0].Hex()
+		}
+		log.S().Infof("[DEBANK_DBG_PROBE] CCD3d8_ADDLOG height=%d topic0=%s data_len=%d", stateDB.blockHeight, topic0, len(evmLog.Data))
+	}
 	if hooks := protocol.GetPipelineHooksCtx(stateDB.ctx); hooks != nil && hooks.OnLog != nil {
 		hooks.OnLog(evmLog)
 	}
