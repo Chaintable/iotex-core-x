@@ -311,6 +311,16 @@ func ExecuteContract(
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to split gas")
 		}
+		if c := protocol.GetStateDiffCollectorCtx(ctx); c != nil && c.Debug {
+			var b, p string
+			if baseFee != nil {
+				b = baseFee.String()
+			}
+			if priorityFee != nil {
+				p = priorityFee.String()
+			}
+			log.T(ctx).Sugar().Infof("[DEBANK_DBG] SPLIT_GAS consumedGas=%d baseFeeAmt=%s priorityFeeAmt=%s", consumedGas, b, p)
+		}
 		depositLog, err = ps.helperCtx.DepositGasFunc(ctx, sm, baseFee, protocol.PriorityFeeOption(priorityFee))
 		if err != nil {
 			return nil, nil, err
