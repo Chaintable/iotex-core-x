@@ -861,6 +861,14 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 
 // AddLog adds log whose transaction amount is larger than 0
 func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
+	if c := protocol.GetStateDiffCollectorCtx(stateDB.ctx); c != nil && c.Debug {
+		topic0 := "(none)"
+		if len(evmLog.Topics) > 0 {
+			topic0 = evmLog.Topics[0].Hex()
+		}
+		log.S().Infof("[DEBANK_DBG] STATEDB_ADDLOG addr=%s topic0=%s ntopics=%d data_len=%d",
+			evmLog.Address.Hex(), topic0, len(evmLog.Topics), len(evmLog.Data))
+	}
 	if hooks := protocol.GetPipelineHooksCtx(stateDB.ctx); hooks != nil && hooks.OnLog != nil {
 		hooks.OnLog(evmLog)
 	}
