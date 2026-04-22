@@ -2417,6 +2417,13 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 			}
 			if idx < len(blk.Actions) {
 				selp := blk.Actions[idx]
+				// non-eth action (GrantReward / PutPollResult / ...) has no paired
+				// inner.OnTxStart (rpc_tracer.CaptureTxStart returns early when
+				// selp.ToEthTx fails). Skip OnTxEnd so the pipeline tracer sees
+				// balanced OnTxStart/OnTxEnd pairs.
+				if _, err := selp.ToEthTx(); err != nil {
+					return
+				}
 				// set TxIndex before converting — updateReceiptIndex hasn't run yet
 				receipt.TxIndex = uint32(idx)
 				gethReceipt := convertActionReceiptToGethReceipt(receipt, selp)
@@ -2514,8 +2521,13 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 	if blk.Height() > 0 {
 		stateDigest := blk.DeltaStateDigest()
 		root = common.BytesToHash(stateDigest[:])
-		// read parent block's DeltaStateDigest as originRoot
-		if parentBlk, err := core.dao.GetBlockByHeight(blk.Height() - 1); err == nil {
+		if blk.Height() == 1 {
+			// block 0 has no DAO entry on archive restore; its synthetic StateRoot
+			// comes from buildGenesisDebankOutput which uses blockchain.GenesisStateRoot
+			// (config hash fallback when createGenesisStates is skipped). Mirror that
+			// here so block_1.originRoot == block_0.root and the chain is continuous.
+			originRoot = blockchain.GenesisStateRoot
+		} else if parentBlk, err := core.dao.GetBlockByHeight(blk.Height() - 1); err == nil {
 			parentDigest := parentBlk.DeltaStateDigest()
 			originRoot = common.BytesToHash(parentDigest[:])
 		}
