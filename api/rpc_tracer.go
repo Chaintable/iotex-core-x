@@ -27,6 +27,14 @@ var _ vm.EVMLogger = (*iotexRPCTracer)(nil)
 //
 // IoTeX calls CaptureTxStart twice for *action.Execution:
 // once in TraceStart and once in executeInEVM. txStarted prevents double init.
+//
+// OnLog buffering: logs emitted between CaptureTxStart and CaptureTxEnd are
+// staged in pendingLogs instead of forwarded to inner.OnLog immediately.
+// This lets Simulate-mode skip paths call DiscardPendingLogs to drop logs
+// from a failed action before CaptureTxEnd runs, preventing them from
+// leaking into the next action's log stream. Normal (success) paths flush
+// pendingLogs inside CaptureTxEnd. logIndex advances only at flush time so
+// a discarded action leaves no gap in the global index sequence.
 type iotexRPCTracer struct {
 	inner *ptracer.RPCTracer
 
@@ -37,6 +45,11 @@ type iotexRPCTracer struct {
 	txStarted      bool // guards against double CaptureTxStart for Execution actions
 	captureStarted bool // true after CaptureStart, safe to call OnLog
 	logIndex       uint // global log index counter within block
+
+	// pendingLogs buffers OnLog calls for the currently open tx frame.
+	// Flushed to inner.OnLog on normal CaptureTxEnd; dropped on
+	// DiscardPendingLogs (Simulate-mode skip path).
+	pendingLogs []*types.Log
 }
 
 func newIotexRPCTracer(chainID uint32) *iotexRPCTracer {
@@ -116,9 +129,30 @@ func (t *iotexRPCTracer) CaptureTxEnd(restGas uint64) {
 		// Duplicate CaptureTxEnd from executeInEVM defer — skip
 		return
 	}
+	t.flushPendingLogs()
 	t.txStarted = false
 	t.currentIdx++
 	t.inner.CaptureTxEnd(restGas)
+}
+
+// flushPendingLogs forwards buffered logs to inner.OnLog in order and assigns
+// their global logIndex. Called inside CaptureTxEnd on the success path.
+func (t *iotexRPCTracer) flushPendingLogs() {
+	for _, l := range t.pendingLogs {
+		l.Index = t.logIndex
+		t.logIndex++
+		t.inner.OnLog(l)
+	}
+	t.pendingLogs = t.pendingLogs[:0]
+}
+
+// DiscardPendingLogs drops buffered logs for the currently open tx frame
+// without flushing to inner.OnLog. Called by TraceStart's cleanup closure
+// on the Simulate-skip path so a failed action's partial logs never leak
+// into the next action's events. Does NOT touch logIndex — a discarded
+// action consumes zero indices.
+func (t *iotexRPCTracer) DiscardPendingLogs() {
+	t.pendingLogs = t.pendingLogs[:0]
 }
 
 func (t *iotexRPCTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
@@ -147,24 +181,22 @@ func (t *iotexRPCTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64,
 	t.inner.CaptureFault(pc, op, gas, cost, scope, depth, err)
 }
 
-// OnLog delegates to inner RPCTracer for event collection.
+// OnLog buffers logs emitted during EVM execution. Actual forward to
+// inner.OnLog + logIndex assignment happens in CaptureTxEnd's flush
+// (success path) or is dropped by DiscardPendingLogs (Simulate-skip path).
 // Guard against empty callstack — IoTeX's MakeTransfer emits logs before CaptureStart.
-// Also sets the global log index since EVM doesn't fill Log.Index.
 func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	if !t.captureStarted {
 		return
 	}
-	l.Index = t.logIndex
-	t.logIndex++
-	t.inner.OnLog(l)
+	t.pendingLogs = append(t.pendingLogs, l)
 }
 
-// EmitTransferLog bypasses the captureStarted gate to emit a log converted
+// EmitTransferLog bypasses the captureStarted gate to buffer a log converted
 // from a native TransactionLog (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE,
 // BUCKET_CREATE_AMOUNT, etc.). Called from the CaptureTx callback so non-EVM
-// actions can still expose their pool flows as events.
+// actions can still expose their pool flows as events. Like OnLog, these are
+// buffered and only committed to the inner tracer at CaptureTxEnd flush.
 func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
-	l.Index = t.logIndex
-	t.logIndex++
-	t.inner.OnLog(l)
+	t.pendingLogs = append(t.pendingLogs, l)
 }

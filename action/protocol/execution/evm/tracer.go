@@ -155,6 +155,19 @@ func TraceStart(ctx context.Context, ws protocol.StateManager, elp action.Envelo
 		if t, ok := GetTracerCtx(ctx); ok && t.DiscardPendingLogs != nil {
 			t.DiscardPendingLogs()
 		}
+		// Emit an empty state-diff record so evmDiffs keeps one entry per
+		// action attempt. The downstream mergeStateDiffs is key-based, so
+		// empty maps are a clean no-op; keeping the entry preserves the
+		// invariant "len(evmDiffs) == number of action attempts" in case any
+		// future consumer indexes by position.
+		if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil {
+			t.CaptureStateDiff(
+				map[common.Hash]struct{}{},
+				map[common.Hash][]byte{},
+				map[common.Hash]map[common.Hash][]byte{},
+				map[common.Hash][]byte{},
+			)
+		}
 		// If EVM's CaptureStart fired but CaptureEnd did not (e.g. Execution
 		// failed mid-execution), the tracerWrapper depth is still > 0 and
 		// the pipeline tracer's captureStarted flag is still true. Force a

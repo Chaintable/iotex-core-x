@@ -2446,7 +2446,8 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 				codes:     codes,
 			})
 		},
-		OnLog: rpcTracer.OnLog,
+		OnLog:              rpcTracer.OnLog,
+		DiscardPendingLogs: rpcTracer.DiscardPendingLogs,
 	})
 
 	// set up workingset-level state diff collector for non-EVM action balance changes
