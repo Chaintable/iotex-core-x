@@ -2435,8 +2435,8 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 		},
 		// EmitTransferLogs fires BEFORE CaptureTxEnd so the logs get into callstack[top].Logs
 		// and are picked up by callTracer.addTraceAndLog when OnTxEnd runs.
-		EmitTransferLogs: func(receipt *action.Receipt) {
-			emitTransferLogsAsEvents(rpcTracer, receipt)
+		EmitTransferLogs: func(receipt *action.Receipt, includeEVMLogs bool) {
+			emitTransferLogsAsEvents(rpcTracer, receipt, includeEVMLogs)
 		},
 		CaptureStateDiff: func(destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte) {
 			evmDiffs = append(evmDiffs, perActionStateDiff{

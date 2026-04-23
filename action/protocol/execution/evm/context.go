@@ -36,8 +36,10 @@ type (
 		// EmitTransferLogs is called after CaptureEnd but before CaptureTxEnd so that
 		// native IoTeX TransactionLogs (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE,
 		// BUCKET_CREATE_AMOUNT, etc.) can be pushed as events and included in the
-		// tracer's addTraceAndLog pass.
-		EmitTransferLogs func(*action.Receipt)
+		// tracer's addTraceAndLog pass. includeEVMLogs is true for non-Execution
+		// actions where the EVM did not run (so receipt.Logs() must be re-emitted);
+		// Execution callers pass false because OnLog already captured EVM logs.
+		EmitTransferLogs func(receipt *action.Receipt, includeEVMLogs bool)
 	}
 )
 

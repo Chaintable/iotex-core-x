@@ -21,6 +21,7 @@ import (
 
 	iotexAddress "github.com/iotexproject/iotex-address/address"
 	"github.com/iotexproject/iotex-core/v2/action"
+	"github.com/iotexproject/iotex-core/v2/action/protocol/account"
 	"github.com/iotexproject/iotex-core/v2/pkg/log"
 	"github.com/iotexproject/iotex-core/v2/blockchain"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
@@ -220,40 +221,46 @@ func convertActionReceiptToGethReceipt(receipt *action.Receipt, selp *action.Sea
 	return gethReceipt
 }
 
-// emitTransferLogsAsEvents converts each TransactionLog in the receipt into an
-// eth types.Log and pushes it through the tracer's log emission path so it
-// appears in block_file.events. This surfaces pool flows (GRANT_REWARD,
-// CLAIM_FROM_REWARDING, GAS_FEE, BUCKET_CREATE_AMOUNT, etc.) that are native
-// IoTeX constructs, not EVM LOG opcodes.
-func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt) {
+// emitTransferLogsAsEvents pushes receipt logs through the tracer so they
+// appear in block_file.events:
+//
+//   - receipt.Logs(): the EVM + protocol-handler logs. For non-Execution
+//     actions the EVM doesn't run and OnLog never fires, so we must re-emit
+//     them here. For Execution actions the EVM path already captured these
+//     via OnLog — skip to avoid doubling.
+//   - receipt.TransactionLogs(): native IoTeX flows (GAS_FEE, GRANT_REWARD,
+//     CLAIM, BUCKET_CREATE_AMOUNT, etc.) expressed as synthetic logs with
+//     addr = account.ProtocolAddr() (matches iotex-native eth_getTransactionReceipt,
+//     see web3server.go:890). These are never produced by the EVM and must
+//     be emitted for every action type.
+//
+// includeEVMLogs = true for non-Execution actions (EVM did not run);
+// includeEVMLogs = false for Execution (EVM already emitted via OnLog).
+func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt, includeEVMLogs bool) {
 	if receipt == nil {
 		return
 	}
-	// 1. Emit receipt.Logs() (e.g. GrantBlockReward's rewardLog). For non-Execution
-	// actions these never reached the tracer through OnLog, so they'd otherwise
-	// be dropped from block_file.events.
-	for _, l := range receipt.Logs() {
-		ethLog := &types.Log{
-			Data:        l.Data,
-			BlockNumber: l.BlockHeight,
-			TxHash:      common.BytesToHash(l.ActionHash[:]),
-			TxIndex:     uint(l.TxIndex),
+	if includeEVMLogs {
+		for _, l := range receipt.Logs() {
+			ethLog := &types.Log{
+				Data:        l.Data,
+				BlockNumber: l.BlockHeight,
+				TxHash:      common.BytesToHash(l.ActionHash[:]),
+				TxIndex:     uint(l.TxIndex),
+			}
+			if addr, err := iotexAddress.FromString(l.Address); err == nil {
+				ethLog.Address = common.BytesToAddress(addr.Bytes())
+			}
+			for _, topic := range l.Topics {
+				ethLog.Topics = append(ethLog.Topics, common.BytesToHash(topic[:]))
+			}
+			rpcTracer.EmitTransferLog(ethLog)
 		}
-		if addr, err := iotexAddress.FromString(l.Address); err == nil {
-			ethLog.Address = common.BytesToAddress(addr.Bytes())
-		}
-		for _, topic := range l.Topics {
-			ethLog.Topics = append(ethLog.Topics, common.BytesToHash(topic[:]))
-		}
-		rpcTracer.EmitTransferLog(ethLog)
 	}
-	// 2. Emit native TransactionLogs (GAS_FEE, GRANT_REWARD, CLAIM, etc.) as
-	// synthetic logs — mirrors eth_getTransactionReceipt behavior so ETL can
-	// see pool flows.
 	if len(receipt.TransactionLogs()) == 0 {
 		return
 	}
-	transferLogs, err := receipt.TransferLogs(iotexAddress.RewardingProtocol, 0)
+	transferLogs, err := receipt.TransferLogs(account.ProtocolAddr().String(), 0)
 	if err != nil {
 		return
 	}
