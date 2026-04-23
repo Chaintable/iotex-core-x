@@ -213,10 +213,38 @@ func (ws *workingSet) runAction(
 		return nil, err
 	}
 	fCtx := protocol.MustGetFeatureCtx(ctx)
-	traceErr := evm.TraceStart(ctx, ws, selp.Envelope)
+	// Per-action state diff collector snapshot for Simulate-mode rollback.
+	// If an action fails and Simulate mode skips it (see process:763 /
+	// runActionsLegacy:891), the writes that the handler made before failing
+	// would otherwise remain in collector.Accounts / .Destructs as "ghost"
+	// entries. Snapshot here, and on the defer below either discard (success)
+	// or revert (failure) to the pre-action state.
+	collector := protocol.GetStateDiffCollectorCtx(ctx)
+	collectorSnap := -1
+	if collector != nil {
+		collectorSnap = collector.Snapshot()
+	}
+	// TraceStart returns a cleanup closure that MUST run exactly once per
+	// CaptureTxStart to keep the tracer frame-balanced. We defer it here and
+	// pass the named `receipt` and `err` return values — the closure branches
+	// on receipt==nil to run either the full end-of-action sequence or the
+	// minimal frame-close sequence. See TraceCleanup's docstring.
+	traceCleanup, traceErr := evm.TraceStart(ctx, ws, selp.Envelope)
 	if traceErr != nil {
 		log.L().Error("failed to start tracing EVM execution", zap.Error(traceErr))
 	}
+	defer func() {
+		if traceErr == nil && traceCleanup != nil {
+			traceCleanup(receipt)
+		}
+		if collector != nil && collectorSnap >= 0 {
+			if receipt != nil && err == nil {
+				collector.DiscardSnapshot(collectorSnap)
+			} else {
+				collector.Revert(collectorSnap)
+			}
+		}
+	}()
 	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, actionHandler := range reg.All() {
 		receipt, err = actionHandler.Handle(ctx, selp.Envelope, ws)
@@ -242,9 +270,6 @@ func (ws *workingSet) runAction(
 	}
 	if receipt == nil {
 		return nil, errors.New("receipt is empty")
-	}
-	if traceErr == nil {
-		evm.TraceEnd(ctx, ws, selp.Envelope, receipt)
 	}
 	if fCtx.EnableBlobTransaction && len(selp.BlobHashes()) > 0 {
 		if err = ws.handleBlob(ctx, selp, receipt); err != nil {

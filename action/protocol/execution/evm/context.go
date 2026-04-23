@@ -40,6 +40,12 @@ type (
 		// actions where the EVM did not run (so receipt.Logs() must be re-emitted);
 		// Execution callers pass false because OnLog already captured EVM logs.
 		EmitTransferLogs func(receipt *action.Receipt, includeEVMLogs bool)
+		// DiscardPendingLogs tells the tracer to drop any logs buffered for the
+		// currently open tx frame without flushing them to the trace output.
+		// Called by TraceStart's cleanup closure on the Simulate-skip path so a
+		// failed action's partial logs never leak into the next action's events.
+		// Nil-safe — callers must check before invoking.
+		DiscardPendingLogs func()
 	}
 )
 
