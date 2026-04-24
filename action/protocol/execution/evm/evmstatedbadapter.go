@@ -824,6 +824,11 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 		}
 	}
 	sn := stateDB.sm.Snapshot()
+	addrs := make([]string, 0, len(c))
+	for a := range c {
+		addrs = append(addrs, fmt.Sprintf("%x", a[:4]))
+	}
+	log.S().Infof("[DEBANK_DBG_CREATE] Snapshot sn=%d cachedContract=%v", sn, addrs)
 	if _, ok := stateDB.selfDestructedSnapshot[sn]; ok {
 		err := errors.New("unexpected error: duplicate snapshot version")
 		if stateDB.fixSnapshotOrder {
