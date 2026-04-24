@@ -758,6 +758,17 @@ func (stateDB *StateDBAdapter) RevertToSnapshot(snapshot int) {
 		}
 	}
 	// restore modified contracts
+	{
+		before := make([]string, 0, len(stateDB.cachedContract))
+		for a := range stateDB.cachedContract {
+			before = append(before, fmt.Sprintf("%x", a[:4]))
+		}
+		after := make([]string, 0, len(stateDB.contractSnapshot[snapshot]))
+		for a := range stateDB.contractSnapshot[snapshot] {
+			after = append(after, fmt.Sprintf("%x", a[:4]))
+		}
+		log.S().Infof("[DEBANK_DBG_CREATE] RevertToSnapshot sn=%d before=%v after=%v", snapshot, before, after)
+	}
 	stateDB.cachedContract = stateDB.contractSnapshot[snapshot]
 	for _, addr := range stateDB.cachedContractAddrs() {
 		c := stateDB.cachedContract[addr]

@@ -275,6 +275,7 @@ func ExecuteContract(
 	if err != nil {
 		return nil, nil, err
 	}
+	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM done status=%d remainingGas=%d contract=%v", statusCode, remainingGas, contractAddress)
 	receipt := &action.Receipt{
 		GasConsumed:       ps.gas - remainingGas,
 		BlockHeight:       ps.blkCtx.BlockHeight,
