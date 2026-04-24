@@ -271,6 +271,8 @@ func ExecuteContract(
 			}
 		}
 	}
+	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM START height=%d ts=%s baseFee=%v gasLimit=%d simulate=%v readOnly=%v",
+		ps.blkCtx.BlockHeight, ps.blkCtx.BlockTimeStamp, ps.blkCtx.BaseFee, ps.blkCtx.GasLimit, ps.blkCtx.Simulate, ps.actionCtx.ReadOnly)
 	retval, depositGas, remainingGas, contractAddress, statusCode, err := executeInEVM(ctx, ps, stateDB)
 	if err != nil {
 		return nil, nil, err
