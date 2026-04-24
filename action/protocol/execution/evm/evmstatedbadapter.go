@@ -1119,6 +1119,13 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 	for addr := range stateDB.cachedContract {
 		contractAddrs = append(contractAddrs, addr)
 	}
+	{
+		addrs := make([]string, 0, len(contractAddrs))
+		for _, a := range contractAddrs {
+			addrs = append(addrs, fmt.Sprintf("%x", a[:4]))
+		}
+		log.S().Infof("[DEBANK_DBG_CREATE] CommitContracts entry cachedContract count=%d first=%v", len(contractAddrs), addrs)
+	}
 	sort.Slice(contractAddrs, func(i, j int) bool { return bytes.Compare(contractAddrs[i][:], contractAddrs[j][:]) < 0 })
 
 	for _, addr := range contractAddrs {
@@ -1316,6 +1323,14 @@ func (stateDB *StateDBAdapter) StateDiff() (
 	// destructs
 	for addr := range stateDB.selfDestructed {
 		destructs[crypto.Keccak256Hash(addr[:])] = struct{}{}
+	}
+
+	{
+		addrs := make([]string, 0, len(stateDB.cachedContract))
+		for a := range stateDB.cachedContract {
+			addrs = append(addrs, fmt.Sprintf("%x", a[:4]))
+		}
+		log.S().Infof("[DEBANK_DBG_CREATE] StateDiff entry cachedContract count=%d first=%v", len(addrs), addrs)
 	}
 
 	// contracts: storages + codes + accounts
