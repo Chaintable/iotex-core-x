@@ -84,6 +84,7 @@ func (c *contractErigon) GetCode() ([]byte, error) {
 }
 
 func (c *contractErigon) SetCode(h hash.Hash256, code []byte) {
+	log.S().Infof("[DEBANK_DBG_CREATE] contractErigon.SetCode addr=%x codeLen=%d hash=%x", c.addr[:], len(code), h[:8])
 	// Mirror *contract.SetCode (contract.go:117-121): update the embedded
 	// Account.CodeHash so SelfState-derived SlimAccount encoding gets the
 	// real hash. Without this line, collector.Accounts[addr].CodeHash

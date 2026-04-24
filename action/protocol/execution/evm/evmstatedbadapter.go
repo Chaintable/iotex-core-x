@@ -1253,8 +1253,11 @@ func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.Pipeline
 	// contract branch above.
 	erigonC, ok := c.(*contractErigon)
 	if !ok {
+		log.S().Infof("[DEBANK_DBG_CREATE] collectPreCommitDiff UNKNOWN contract type %T addr=%x", c, addr[:])
 		return
 	}
+	log.S().Infof("[DEBANK_DBG_CREATE] collectPreCommitDiff erigon addr=%x dirtyCode=%v cacheLen=%d committedN=%d",
+		addr[:], erigonC.dirtyCode, len(erigonC.code), len(erigonC.committed))
 	if len(erigonC.committed) > 0 {
 		storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
 		for key := range erigonC.committed {
@@ -1346,6 +1349,8 @@ func (stateDB *StateDBAdapter) StateDiff() (
 				codes[codeHash] = common.CopyBytes(inner.code)
 			}
 		} else if erigonC, ok := c.(*contractErigon); ok {
+			log.S().Infof("[DEBANK_DBG_CREATE] StateDiff erigon addr=%x dirtyCode=%v cacheLen=%d committedN=%d",
+				addr[:], erigonC.dirtyCode, len(erigonC.code), len(erigonC.committed))
 			// Erigon-backed contract (used in trace_debankBlock replay dryrun path)
 			if len(erigonC.committed) > 0 {
 				storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
