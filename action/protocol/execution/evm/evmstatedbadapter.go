@@ -1212,16 +1212,53 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 
 // collectPreCommitDiff collects storage diffs and code from a contract before Commit() clears dirty tracking
 func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.PipelineStateDiffCollector, addr common.Address, c Contract) {
-	inner := getInnerContract(c)
-	if inner == nil {
+	addrHash := crypto.Keccak256Hash(addr[:])
+	if inner := getInnerContract(c); inner != nil {
+		// regular *contract / *contractAdapter path
+		// storage diff: committed map keys = modified slots, trie has new values
+		if len(inner.committed) > 0 {
+			storageMap := make(map[common.Hash][]byte, len(inner.committed))
+			for key := range inner.committed {
+				val, _ := inner.trie.Get(key[:])
+				slotHash := crypto.Keccak256Hash(key[:])
+				if len(val) > 0 && !isAllZero(val) {
+					encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
+					storageMap[slotHash] = encoded
+				} else {
+					storageMap[slotHash] = nil
+				}
+			}
+			if existing, ok := collector.Storages[addrHash]; ok {
+				for k, v := range storageMap {
+					existing[k] = v
+				}
+			} else {
+				collector.Storages[addrHash] = storageMap
+			}
+		}
+		// code: dirtyCode means new contract deployment in this tx.
+		// Use keccak256(code) — Account.CodeHash isn't updated until contract.Commit()
+		// runs, which happens AFTER this function.
+		if inner.dirtyCode && len(inner.code) > 0 {
+			codeHash := crypto.Keccak256Hash(inner.code)
+			collector.Codes[codeHash] = common.CopyBytes(inner.code)
+		}
 		return
 	}
-	addrHash := crypto.Keccak256Hash(addr[:])
-	// storage diff: committed map keys = modified slots, trie has new values
-	if len(inner.committed) > 0 {
-		storageMap := make(map[common.Hash][]byte, len(inner.committed))
-		for key := range inner.committed {
-			val, _ := inner.trie.Get(key[:])
+	// contractErigon path (used in trace_debankBlock dryrun replay). The
+	// primary capture of code still happens via StateDiff() -> evmDiffs,
+	// but a pre-Sumatra CREATE was observed losing code through that path
+	// (intra.GetCode returned empty). Treat this branch as the backstop
+	// that writes to collector.Codes directly, mirroring the regular
+	// contract branch above.
+	erigonC, ok := c.(*contractErigon)
+	if !ok {
+		return
+	}
+	if len(erigonC.committed) > 0 {
+		storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
+		for key := range erigonC.committed {
+			val, _ := erigonC.GetState(key)
 			slotHash := crypto.Keccak256Hash(key[:])
 			if len(val) > 0 && !isAllZero(val) {
 				encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
@@ -1238,12 +1275,12 @@ func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.Pipeline
 			collector.Storages[addrHash] = storageMap
 		}
 	}
-	// code: dirtyCode means new contract deployment in this tx.
-	// Use keccak256(code) — Account.CodeHash isn't updated until contract.Commit()
-	// runs, which happens AFTER this function.
-	if inner.dirtyCode && len(inner.code) > 0 {
-		codeHash := crypto.Keccak256Hash(inner.code)
-		collector.Codes[codeHash] = common.CopyBytes(inner.code)
+	if erigonC.dirtyCode {
+		code, _ := erigonC.GetCode()
+		if len(code) > 0 {
+			codeHash := crypto.Keccak256Hash(code)
+			collector.Codes[codeHash] = common.CopyBytes(code)
+		}
 	}
 }
 
