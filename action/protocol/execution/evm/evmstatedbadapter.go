@@ -290,6 +290,11 @@ func (stateDB *StateDBAdapter) accountCreationOpts() []state.AccountCreationOpti
 
 // CreateAccount creates an account in iotx blockchain
 func (stateDB *StateDBAdapter) CreateAccount(evmAddr common.Address) {
+	// probe: log pre-existing code hash and nonce for CREATE collision detection
+	if existing := stateDB.GetCodeHash(evmAddr); existing != (common.Hash{}) {
+		log.S().Infof("[DEBANK_DBG_CREATE] CreateAccount PRE-STATE addr=%x codeHash=%x nonce=%d",
+			evmAddr[:], existing[:8], stateDB.GetNonce(evmAddr))
+	}
 	addr, err := address.FromBytes(evmAddr.Bytes())
 	if stateDB.assertError(err, "Failed to convert evm address.", zap.Error(err)) {
 		return
