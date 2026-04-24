@@ -609,6 +609,7 @@ func executeInEVM(ctx context.Context, evmParams *Params, stateDB stateDB) ([]by
 		ret, remainingGas, evmErr = evm.Call(executor, *evmParams.contract, evmParams.data, remainingGas, amount)
 	}
 	if evmErr != nil {
+		log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM evmErr=%v retLen=%d retHex=%x", evmErr, len(ret), ret)
 		log.T(ctx).Debug("evm error", zap.Error(evmErr))
 		// The only possible consensus-error would be if there wasn't
 		// sufficient balance to make the transfer happen.
