@@ -1399,6 +1399,17 @@ func (svr *web3Handler) debankBlockWithDebug(ctx context.Context, in *gjson.Resu
 	return svr.coreService.DebankBlockWithDebug(ctx, height)
 }
 
+// Note on error handling:
+// trace_debankBlock returns Go sentinel errors (ErrCanonicalNotFinalized /
+// ErrHistoryUnavailable / ErrCanonicalCodeMissing) which propagate to the JSON-RPC
+// layer as generic Internal errors (-32603). ETL on the consumer side already
+// auto-retries on any error and blocks on persistent failure — that's the desired
+// behavior for ALL error classes:
+//   - NotFinalized: transient (tip catches up) → retry succeeds automatically
+//   - HistoryUnavailable / CodeMissing: persistent → retries exhaust → ETL blocks
+//     → human investigates (skip would silently lose data; block forces attention)
+// No code mapping needed; differentiation is available via metrics for ops dashboards.
+
 func (svr *web3Handler) traceBlockByNumber(ctx context.Context, in *gjson.Result) (any, error) {
 	blkParam, tracerParam := in.Get("params.0"), in.Get("params.1")
 	blkNum, err := parseBlockNumberOrHash(&blkParam)
