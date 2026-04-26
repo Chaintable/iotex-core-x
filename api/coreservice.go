@@ -2579,12 +2579,26 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 	out.BlockFile.Events = canonicalEvents
 	out.BlockFile.StorageContracts = storageContracts
 
-	// Override tx.Status / tx.GasUsed from canonical receipts on EVERY tx (replay's gas
-	// can drift slightly even when status agrees). For txs whose replay status DIVERGES
-	// from canonical (~0.7% pre-Sumatra), also strip their replay-derived traces /
-	// error_traces / error_events — replay's call tree is not the on-chain truth there.
-	// Main events come from receipts so they stay correct in either direction.
-	divergedTxs := overrideTxsAndStripDivergedTraces(out, receipts)
+	// Build receipt-by-tx-ID lookup. Indexing receipts and BlockFile.Txs by parallel
+	// position is unsafe — receipts is action-ordered (covers ALL actions incl. native
+	// GrantReward / staking) while BlockFile.Txs only holds eth-compatible actions
+	// packed sequentially. Match by action_hash via tx.ID = "0x"+actionHashHex.
+	receiptByTxID := make(map[string]*action.Receipt, len(receipts))
+	for _, r := range receipts {
+		if r == nil {
+			continue
+		}
+		key := "0x" + hex.EncodeToString(r.ActionHash[:])
+		receiptByTxID[key] = r
+	}
+
+	// Override tx.Status / tx.GasUsed from canonical receipts on EVERY eth-compatible tx
+	// (replay's gas can drift slightly even when status agrees). For txs whose replay
+	// status DIVERGES from canonical (~0.7% pre-Sumatra), also strip their replay-derived
+	// traces / error_traces / error_events — replay's call tree is not the on-chain truth
+	// there — and append a synthesized canonical-minimal trace. Main events come from
+	// receipts so they stay correct in either direction.
+	divergedTxs := overrideTxsAndStripDivergedTraces(out, receiptByTxID)
 	if divergedTxs > 0 {
 		replayDivergedBlocksTotal.Inc()
 	}

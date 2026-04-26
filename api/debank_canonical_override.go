@@ -34,28 +34,37 @@ import (
 // detected here — it's a documented limitation of trace correctness without real
 // canonical traces. State-correctness (state_diff/events) is unaffected by trace drift.
 //
+// Receipt lookup is by tx.ID (= "0x" + action_hash hex), NOT by index — out.BlockFile.Txs
+// only contains eth-compatible actions while receipts covers ALL actions including non-EVM
+// (GrantReward / staking / etc.). Indexing receipts[i] against Txs[i] would silently
+// misalign on any block with native actions interleaved.
+//
 // Returns the count of diverged txs.
 func overrideTxsAndStripDivergedTraces(
 	out *ptypes.DebankOutPut,
-	receipts []*action.Receipt,
+	receiptByTxID map[string]*action.Receipt,
 ) int {
 	if out == nil || out.BlockFile == nil {
 		return 0
 	}
 
-	// First pass: override tx.Status / tx.GasUsed always; collect (txID → receipt) for
-	// diverged txs.
+	// First pass: walk BlockFile.Txs (eth-compatible only), look up the matching
+	// canonical receipt by tx.ID, and override tx.Status / tx.GasUsed. Collect diverged
+	// txs for second pass.
 	type divergedEntry struct {
 		txIdx   int
 		receipt *action.Receipt
 	}
-	diverged := make(map[string]divergedEntry) // txID → entry
+	diverged := make(map[string]divergedEntry) // tx.ID → entry
 
-	for i, hr := range receipts {
-		if i >= len(out.BlockFile.Txs) || hr == nil {
+	for i := range out.BlockFile.Txs {
+		tx := &out.BlockFile.Txs[i]
+		hr := receiptByTxID[tx.ID]
+		if hr == nil {
+			// No canonical receipt for this tx (shouldn't happen for valid blocks; the
+			// dao receipts are exhaustive). Defensive: skip rather than crash.
 			continue
 		}
-		tx := &out.BlockFile.Txs[i]
 		canonicalSuccess := hr.Status == uint64(iotextypes.ReceiptStatus_Success)
 		if tx.Status != canonicalSuccess {
 			diverged[tx.ID] = divergedEntry{txIdx: i, receipt: hr}
