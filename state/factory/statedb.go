@@ -117,6 +117,15 @@ func SetDiffCallback(f Factory, cb StateDiffCallback) bool {
 	return false
 }
 
+// ErigonDB exposes the underlying ErigonDB for canonical state-diff queries.
+// Returns nil on stateDBs that aren't backed by Erigon (e.g., legacy / in-memory factories).
+//
+// Used by api.coreService to construct canonical state_diff via Erigon's AccountChangeSet
+// / StorageChangeSet / kv.Code rather than replay-derived state.
+func (sdb *stateDB) ErigonDB() *erigonstore.ErigonDB {
+	return sdb.erigonDB
+}
+
 // DisableWorkingSetCacheOption disable workingset cache
 func DisableWorkingSetCacheOption() StateDBOption {
 	return func(sdb *stateDB, cfg *Config) error {
