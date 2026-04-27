@@ -35,7 +35,14 @@ func NewHTTPServer(route string, port int, handler http.Handler) *HTTPServer {
 	mux := http.NewServeMux()
 	mux.Handle("/"+route, handler)
 
-	svr := httputil.NewServer(":"+strconv.Itoa(port), mux, httputil.ReadHeaderTimeout(10*time.Second))
+	// trace_debankBlock can legitimately take 25-60s on hot blocks (thousands
+	// of txs/traces). Default 30s read/write timeout truncates the response
+	// and surfaces to clients as hyper IncompleteMessage / panic.
+	svr := httputil.NewServer(":"+strconv.Itoa(port), mux,
+		httputil.ReadHeaderTimeout(10*time.Second),
+		httputil.ReadTimeout(180*time.Second),
+		httputil.WriteTimeout(180*time.Second),
+	)
 	return &HTTPServer{
 		svr: &svr,
 	}
