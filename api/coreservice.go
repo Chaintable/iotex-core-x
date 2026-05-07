@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -81,6 +82,33 @@ const (
 	// defaultTraceTimeout is the amount of time a single transaction can execute
 	// by default before being forcefully aborted.
 	defaultTraceTimeout = 5 * time.Second
+)
+
+type (
+	// SimulateBatchArg is one transaction in a SimulateExecutionBatch call.
+	// Skip=true marks a slot the caller already handled out-of-band (e.g. an
+	// IoTeX protocol address read routed through ABI dispatch); the batch
+	// engine leaves that index untouched and never advances ws state for it.
+	SimulateBatchArg struct {
+		Caller   address.Address
+		Envelope action.Envelope
+		Skip     bool
+	}
+	// SimulateBatchResult is the per-tx result of SimulateExecutionBatch.
+	// TraceData is the raw JSON callFrame produced by the underlying callTracer
+	// (empty for skipped slots and for txs whose tracer setup failed).
+	SimulateBatchResult struct {
+		Output    []byte
+		Receipt   *action.Receipt
+		TraceData json.RawMessage
+		Err       error
+	}
+	// SimulateBatchInfo is the block-level info echoed by SimulateExecutionBatch.
+	SimulateBatchInfo struct {
+		BlockHeight uint64
+		BlockHash   hash.Hash256
+		BlockTime   time.Time
+	}
 )
 
 type (
@@ -167,6 +195,10 @@ type (
 		ChainListener() apitypes.Listener
 		// SimulateExecution simulates execution
 		SimulateExecution(context.Context, address.Address, action.Envelope) ([]byte, *action.Receipt, error)
+		// SimulateExecutionBatch simulates a batch of executions sequentially against a single
+		// working set, allowing later transactions to observe state changes from earlier ones.
+		// archive=true to query at a specific past height.
+		SimulateExecutionBatch(ctx context.Context, height uint64, archive bool, args []SimulateBatchArg) ([]SimulateBatchResult, SimulateBatchInfo, error)
 		// SyncingProgress returns the syncing status of node
 		SyncingProgress() (uint64, uint64, uint64)
 		// TipHeight returns the tip of the chain
@@ -2255,6 +2287,129 @@ func (core *coreService) simulateExecution(
 		DepositGasFunc: rewarding.DepositGas,
 	})
 	return evm.SimulateExecution(ctx, ws, addr, elp, opts...)
+}
+
+// SimulateExecutionBatch simulates txs serially against a single working set.
+// It mirrors evm.SimulateExecution's context setup but uses ReadOnly=false on
+// each per-action context so EVM advances nonces and persists state diffs in
+// the ws across the batch.
+func (core *coreService) SimulateExecutionBatch(
+	ctx context.Context,
+	height uint64,
+	archive bool,
+	args []SimulateBatchArg,
+) ([]SimulateBatchResult, SimulateBatchInfo, error) {
+	var (
+		err error
+		ws  protocol.StateManagerWithCloser
+	)
+	if archive {
+		ctx, err = core.bc.ContextAtHeight(ctx, height)
+	} else {
+		ctx, err = core.bc.Context(ctx)
+	}
+	if err != nil {
+		return nil, SimulateBatchInfo{}, status.Error(codes.Internal, err.Error())
+	}
+	bcCtx := protocol.MustGetBlockchainCtx(ctx)
+	ctx = protocol.WithFeatureCtx(protocol.WithBlockCtx(ctx, protocol.BlockCtx{
+		BlockHeight:    bcCtx.Tip.Height,
+		BlockTimeStamp: bcCtx.Tip.Timestamp,
+	}))
+	if archive {
+		ws, err = core.sf.WorkingSetAtHeight(ctx, height)
+	} else {
+		ws, err = core.sf.WorkingSet(ctx)
+	}
+	if err != nil {
+		return nil, SimulateBatchInfo{}, status.Error(codes.Internal, err.Error())
+	}
+	defer ws.Close()
+
+	ctx = evm.WithHelperCtx(ctx, evm.HelperContext{
+		GetBlockHash:   bcCtx.GetBlockHash,
+		GetBlockTime:   bcCtx.GetBlockTime,
+		DepositGasFunc: rewarding.DepositGas,
+	})
+	g := core.bc.Genesis()
+	zeroAddr, err := address.FromString(address.ZeroAddress)
+	if err != nil {
+		return nil, SimulateBatchInfo{}, err
+	}
+	simCtx := protocol.WithFeatureCtx(protocol.WithBlockCtx(ctx, protocol.BlockCtx{
+		BlockHeight:    bcCtx.Tip.Height + 1,
+		BlockTimeStamp: bcCtx.Tip.Timestamp.Add(g.BlockInterval),
+		GasLimit:       g.BlockGasLimitByHeight(bcCtx.Tip.Height + 1),
+		Producer:       zeroAddr,
+		BaseFee:        protocol.CalcBaseFee(g.Blockchain, &bcCtx.Tip),
+		ExcessBlobGas:  protocol.CalcExcessBlobGas(bcCtx.Tip.ExcessBlobGas, bcCtx.Tip.BlobGasUsed),
+	}))
+
+	results := make([]SimulateBatchResult, len(args))
+	callTracerName := "callTracer"
+	for i := range args {
+		if args[i].Skip {
+			// Caller pre-handled this slot (e.g. protocol-addr ABI dispatch);
+			// leave ws state untouched so subsequent EVM txs see the same state
+			// they would without this slot.
+			continue
+		}
+		accState, accErr := accountutil.AccountState(simCtx, ws, args[i].Caller)
+		if accErr != nil {
+			results[i] = SimulateBatchResult{Err: accErr}
+			continue
+		}
+		var pendingNonce uint64
+		if protocol.MustGetFeatureCtx(simCtx).UseZeroNonceForFreshAccount {
+			pendingNonce = accState.PendingNonceConsideringFreshAccount()
+		} else {
+			pendingNonce = accState.PendingNonce()
+		}
+		args[i].Envelope.SetNonce(pendingNonce)
+
+		// Per-tx callTracer captures the EVM call frame tree for the wire
+		// `traces[]` field. Tracer setup failures degrade gracefully: the tx
+		// still runs without trace collection rather than failing the batch.
+		callTracer := newEVMTracer(new(tracers.Context), &tracers.TraceConfig{
+			Tracer: &callTracerName,
+		})
+		txCtx := simCtx
+		tracerOK := callTracer.Reset() == nil
+		if tracerOK {
+			txCtx = protocol.WithVMConfigCtx(simCtx, vm.Config{
+				Tracer:    callTracer,
+				NoBaseFee: true,
+			})
+		}
+		actionHash := hash.Hash256b(byteutil.Must(proto.Marshal(args[i].Envelope.Proto())))
+		txCtx = protocol.WithActionCtx(txCtx, protocol.ActionCtx{
+			Caller:     args[i].Caller,
+			ActionHash: actionHash,
+			ReadOnly:   false,
+		})
+		retval, receipt, execErr := evm.ExecuteContract(txCtx, ws, args[i].Envelope)
+
+		var traceData json.RawMessage
+		if tracerOK {
+			if rawTracer, ok := callTracer.Unwrap().(tracers.Tracer); ok {
+				if td, terr := rawTracer.GetResult(); terr == nil {
+					traceData = td
+				}
+			}
+		}
+		results[i] = SimulateBatchResult{
+			Output:    retval,
+			Receipt:   receipt,
+			TraceData: traceData,
+			Err:       execErr,
+		}
+	}
+
+	return results, SimulateBatchInfo{
+		BlockHeight: bcCtx.Tip.Height,
+		BlockHash:   bcCtx.Tip.Hash,
+		BlockTime:   bcCtx.Tip.Timestamp,
+	}, nil
 }
 
 func (core *coreService) workingSetAt(ctx context.Context, height uint64) (context.Context, protocol.StateManagerWithCloser, error) {
