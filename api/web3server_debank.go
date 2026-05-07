@@ -197,13 +197,7 @@ func (svr *web3Handler) executeMultiCallOne(
 		return r
 	}
 	to := toAddr.String()
-	var data []byte
-	switch {
-	case arg.Data != nil:
-		data = *arg.Data
-	case arg.Input != nil:
-		data = *arg.Input
-	}
+	data := arg.callData()
 
 	// Protocol addr routing
 	if result, handled, perr := svr.callProtocolAddr(to, data, height); handled {
@@ -364,10 +358,7 @@ func (svr *web3Handler) protocolAddrSimulateResult(arg *debankCallArgs, height u
 	if err != nil {
 		return nil, false
 	}
-	var data []byte
-	if arg.Data != nil {
-		data = *arg.Data
-	}
+	data := arg.callData()
 	raw, handled, perr := svr.callProtocolAddr(toAddr.String(), data, height)
 	if !handled {
 		return nil, false
@@ -523,10 +514,7 @@ func buildEnvelopeFromDebankCallArgs(arg *debankCallArgs) (address.Address, acti
 	if arg.Value != nil {
 		value = arg.Value.ToInt()
 	}
-	var data []byte
-	if arg.Data != nil {
-		data = *arg.Data
-	}
+	data := arg.callData()
 	gasLimit := uint64(0)
 	if arg.Gas != nil {
 		gasLimit = uint64(*arg.Gas)

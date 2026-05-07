@@ -282,6 +282,120 @@ func TestSimulateTransactionsDebank_ProtocolAddrRouting(t *testing.T) {
 	require.NotEmpty(resp.Results[0].Traces[0].Output, "protocol-addr trace should carry ABI-encoded output")
 }
 
+// TestDebankArgsCallData_InputDataPrecedence pins the calldata-field
+// resolution rules used by simulateTransactionsDebank /
+// contractMultiCallDebank. eth_call's parseCallObject picks `input` over
+// `data` (web3server_utils.go:370-374); both debank arg types must agree, so
+// any client that emits the EVM-standard `input` field gets its calldata
+// honored instead of silently dropped.
+//
+// Pre-fix: debankCallArgs (used by simulate) had no Input field at all, so
+// JSON unmarshal of `{"input":"0x..."}` left Data=nil and the EVM saw an
+// empty calldata; non-trivial contract calls returned successful-but-empty
+// traces, and protocol-addr READ selectors hit BuildReadStateRequest's
+// `len<4` branch with errInvalidCallData ("invalid call binary data").
+func TestDebankArgsCallData_InputDataPrecedence(t *testing.T) {
+	require := require.New(t)
+	mk := func(s string) *hexutil.Bytes { b := hexutil.Bytes(common.FromHex(s)); return &b }
+
+	t.Run("debankCallArgs", func(t *testing.T) {
+		// input only — the modern EVM-standard shape that used to be dropped.
+		require.Equal([]byte{0xad, 0x7a, 0x67, 0x2f}, (&debankCallArgs{Input: mk("0xad7a672f")}).callData())
+		// data only — legacy shape, still honored.
+		require.Equal([]byte{0xab, 0x2f, 0x0e, 0x51}, (&debankCallArgs{Data: mk("0xab2f0e51")}).callData())
+		// both — input wins, matching parseCallObject (web3server_utils.go:370).
+		got := (&debankCallArgs{Input: mk("0x01"), Data: mk("0x02")}).callData()
+		require.Equal([]byte{0x01}, got, "input must win over data when both supplied")
+		// neither — nil for downstream `len(data) < 4` short-circuits.
+		require.Nil((&debankCallArgs{}).callData())
+	})
+
+	t.Run("debankTransactionArgs", func(t *testing.T) {
+		require.Equal([]byte{0xad, 0x7a, 0x67, 0x2f}, (&debankTransactionArgs{Input: mk("0xad7a672f")}).callData())
+		require.Equal([]byte{0xab, 0x2f, 0x0e, 0x51}, (&debankTransactionArgs{Data: mk("0xab2f0e51")}).callData())
+		got := (&debankTransactionArgs{Input: mk("0x01"), Data: mk("0x02")}).callData()
+		require.Equal([]byte{0x01}, got, "input must win over data when both supplied")
+		require.Nil((&debankTransactionArgs{}).callData())
+	})
+}
+
+// TestSimulateTransactionsDebank_InputFieldHonored is the regression test
+// for Bug 3: a debank_simulateTransactions request that carries calldata in
+// the EVM-standard `input` field (rather than legacy `data`) must reach
+// callProtocolAddr / SimulateExecutionBatch with the calldata intact.
+//
+// We assert both halves of the dispatch:
+//   - Protocol-addr READ selector via `input` -> protocolAddrSimulateResult
+//     calls callProtocolAddr with the right calldata, which routes through
+//     BuildReadStateRequest -> ReadState. Pre-fix this hit the `len<4`
+//     branch with errInvalidCallData.
+//   - Regular EVM call via `input` -> buildEnvelopeFromDebankCallArgs sets
+//     the envelope's data to the input bytes, surfaced via the captured
+//     SimulateBatchArg's Envelope.
+func TestSimulateTransactionsDebank_InputFieldHonored(t *testing.T) {
+	require := require.New(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	core := NewMockCoreService(ctrl)
+	web3svr := &web3Handler{core, nil, _defaultBatchRequestLimit}
+
+	// keccak("totalBalance()")[:4] == 0xad7a672f, the rewarding-protocol READ
+	// selector used by callProtocolAddr's BuildReadStateRequest.
+	amount := big.NewInt(12345)
+	core.EXPECT().ReadState(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&iotexapi.ReadStateResponse{Data: []byte(amount.String())}, nil)
+
+	// Capture batch args to verify the regular-call envelope received the
+	// input bytes verbatim. Selector 0x12345678 is arbitrary — we only need
+	// to confirm it round-trips through buildEnvelopeFromDebankCallArgs.
+	var captured []SimulateBatchArg
+	core.EXPECT().
+		SimulateExecutionBatch(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ uint64, _ bool, args []SimulateBatchArg) ([]SimulateBatchResult, SimulateBatchInfo, error) {
+			captured = args
+			out := make([]SimulateBatchResult, len(args))
+			return out, SimulateBatchInfo{BlockHeight: 100, BlockHash: hash.ZeroHash256, BlockTime: time.Unix(1700000000, 0)}, nil
+		})
+
+	in := gjson.Parse(`{"params":[
+		[
+			{
+				"from":"0x0000000000000000000000000000000000000001",
+				"to":"0xA576C141e5659137ddDa4223d209d4744b2106BE",
+				"input":"0xad7a672f"
+			},
+			{
+				"from":"0x0000000000000000000000000000000000000001",
+				"to":"0x7c13866F9253DEf79e20034eDD011e1d69E67fe5",
+				"input":"0x12345678deadbeef"
+			}
+		],
+		{"block_id":"latest","type":"Equals"}
+	]}`)
+	out, err := web3svr.simulateTransactionsDebank(context.Background(), &in)
+	require.NoError(err)
+
+	resp := out.(debankSimulateResp)
+	require.Len(resp.Results, 2)
+
+	// Slot 0: protocol addr — the input field reached callProtocolAddr, the
+	// READ selector parsed cleanly, and the synthetic trace carries non-empty
+	// ABI-encoded output. Pre-fix this slot returned -39000 with
+	// "invalid call binary data".
+	require.Equal(0, resp.Results[0].Code, "protocol-addr READ via input field must succeed")
+	require.NotEmpty(resp.Results[0].Traces[0].Output)
+
+	// Slot 1: regular EVM call — captured envelope must carry the input bytes
+	// (not an empty []byte). Pre-fix this slot's envelope had data=[].
+	require.Len(captured, 2)
+	require.False(captured[1].Skip)
+	require.NotNil(captured[1].Envelope)
+	exec, ok := captured[1].Envelope.Action().(*action.Execution)
+	require.True(ok, "second slot must build an Execution envelope")
+	require.Equal([]byte{0x12, 0x34, 0x56, 0x78, 0xde, 0xad, 0xbe, 0xef}, exec.Data(),
+		"calldata from `input` field must reach the envelope verbatim")
+}
+
 // TestFlattenCallFrames verifies that nested callTracer JSON is flattened
 // depth-first with correct ID/parent/pos linking.
 func TestFlattenCallFrames(t *testing.T) {
