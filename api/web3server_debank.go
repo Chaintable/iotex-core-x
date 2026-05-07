@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -244,8 +245,7 @@ func (svr *web3Handler) executeMultiCallOne(
 		ret, receipt, err = svr.coreService.WithHeight(height).ReadContract(ctx, caller, elp)
 	}
 	if err != nil {
-		r.Code = debankSimulateErrorUnknown
-		r.Err = err.Error()
+		r.Code, r.Err = mapEvmErrorToDebankCode(err)
 		return r
 	}
 	if receipt != nil {
@@ -274,6 +274,39 @@ func (svr *web3Handler) executeMultiCallOne(
 // Returning the status number in the err string for the catch-all branch
 // keeps writer-side bugs traceable downstream rather than swallowing them
 // behind a generic "unknown" message.
+// mapEvmErrorToDebankCode classifies a *raw* error returned by the EVM /
+// SimulateExecutionBatch / ReadContract paths — i.e. the cases where a
+// receipt was never produced — into a DeBank wire code. The receipt-based
+// path uses mapReceiptStatusToDebankCode; this one is its sibling for the
+// "tx failed before any receipt" cases.
+//
+// Recognized:
+//   - errors.Is(action.ErrInsufficientFunds)            iotex-side sentinel
+//     (msg: "insufficient funds for gas * price + value")
+//   - msg contains "insufficient balance"               EVM side
+//     (vm.ErrInsufficientBalance from go-ethereum:
+//      "insufficient balance for transfer")
+//   - msg contains "insufficient funds"                 catch-all variants
+//
+// All collapse to -39002 BalanceExhausted. Anything else falls through to
+// -39004 Unknown so writer-side bugs stay visible rather than being silently
+// reclassified.
+//
+// nil err returns (0, ""), so callers can use this as a single-line replacement
+// for both the success and error paths if desired.
+func mapEvmErrorToDebankCode(err error) (code int, errMsg string) {
+	if err == nil {
+		return 0, ""
+	}
+	msg := err.Error()
+	if errors.Is(err, action.ErrInsufficientFunds) ||
+		strings.Contains(msg, "insufficient balance") ||
+		strings.Contains(msg, "insufficient funds") {
+		return debankSimulateErrorInsufficientBalance, msg
+	}
+	return debankSimulateErrorUnknown, msg
+}
+
 func mapReceiptStatusToDebankCode(status uint64, revertMsg string) (code int, errMsg string) {
 	switch status {
 	case uint64(iotextypes.ReceiptStatus_Success):
@@ -303,12 +336,7 @@ func simulateBatchToDebank(r *SimulateBatchResult, txIdx int64) debankSingleSimu
 		Events: []debankEvent{},
 	}
 	if r.Err != nil {
-		if errors.Is(r.Err, action.ErrInsufficientFunds) {
-			out.Code = debankSimulateErrorInsufficientBalance
-		} else {
-			out.Code = debankSimulateErrorUnknown
-		}
-		out.Err = r.Err.Error()
+		out.Code, out.Err = mapEvmErrorToDebankCode(r.Err)
 		return out
 	}
 	if r.Receipt == nil {

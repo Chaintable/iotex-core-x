@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -394,6 +395,47 @@ func TestSimulateTransactionsDebank_InputFieldHonored(t *testing.T) {
 	require.True(ok, "second slot must build an Execution envelope")
 	require.Equal([]byte{0x12, 0x34, 0x56, 0x78, 0xde, 0xad, 0xbe, 0xef}, exec.Data(),
 		"calldata from `input` field must reach the envelope verbatim")
+}
+
+// TestMapEvmErrorToDebankCode pins the error -> wire-code classification used
+// by the simulate batch path (when Receipt is nil) and the multi-call path.
+//
+// Pre-fix the simulate path checked only `errors.Is(action.ErrInsufficientFunds)`
+// (the iotex-side sentinel "insufficient funds for gas * price + value") and
+// missed go-ethereum's vm.ErrInsufficientBalance ("insufficient balance for
+// transfer"). The multi-call path lumped every error into -39004. Both now
+// route through this helper so a balance failure returns -39002
+// BalanceExhausted regardless of which sentinel the underlying engine raises.
+func TestMapEvmErrorToDebankCode(t *testing.T) {
+	require := require.New(t)
+
+	// Nil error -> success.
+	code, msg := mapEvmErrorToDebankCode(nil)
+	require.Equal(0, code)
+	require.Equal("", msg)
+
+	// iotex sentinel -> -39002. Original message preserved for traceability.
+	code, msg = mapEvmErrorToDebankCode(action.ErrInsufficientFunds)
+	require.Equal(debankSimulateErrorInsufficientBalance, code)
+	require.Equal(action.ErrInsufficientFunds.Error(), msg)
+
+	// EVM-side error string ("insufficient balance for transfer") — the case
+	// that was being misclassified as -39004 before the fix.
+	code, _ = mapEvmErrorToDebankCode(errors.New("insufficient balance for transfer"))
+	require.Equal(debankSimulateErrorInsufficientBalance, code)
+
+	// gRPC-wrapped variant we observed from coreService.ReadContract:
+	// "rpc error: code = Internal desc = insufficient balance for transfer"
+	code, _ = mapEvmErrorToDebankCode(errors.New("rpc error: code = Internal desc = insufficient balance for transfer"))
+	require.Equal(debankSimulateErrorInsufficientBalance, code)
+
+	// "insufficient funds" variant — covers wrapped errors from any layer.
+	code, _ = mapEvmErrorToDebankCode(errors.New("insufficient funds for gas * price + value"))
+	require.Equal(debankSimulateErrorInsufficientBalance, code)
+
+	// Unrelated error -> -39004 catch-all.
+	code, _ = mapEvmErrorToDebankCode(errors.New("something broke"))
+	require.Equal(debankSimulateErrorUnknown, code)
 }
 
 // TestFlattenCallFrames verifies that nested callTracer JSON is flattened
