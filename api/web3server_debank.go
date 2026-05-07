@@ -150,10 +150,31 @@ func (svr *web3Handler) contractMultiCallDebank(ctx context.Context, in *gjson.R
 	return &debankMultiCallResp{Results: results, Stats: stats}, nil
 }
 
-// estimateGasDebank handles debank_estimateGas. Aligned with eth_estimateGas;
-// any extra blockContext / blockOverrides params are accepted but ignored.
+// estimateGasDebank handles debank_estimateGas. The call object (params.0)
+// is shared with eth_estimateGas, but params.1 follows debank's
+// `{block_id, type}` shape, not eth-style BlockNumberOrHash. Forwarding the
+// raw gjson result to estimateGas would feed that object into
+// parseCallObject's params.1 path, where rpc.BlockNumberOrHash.UnmarshalJSON
+// silently accepts the unknown shape and overwrites the default LatestBlockNumber
+// with both BlockNumber and BlockHash nil; blockNumberOrHashToHeight then
+// panics on `*bn.BlockNumber`. Resolve the debank block context up front and
+// rebuild the params payload in eth-style before delegating. params.2
+// (blockOverrides) is intentionally dropped — v1 ignores overrides.
 func (svr *web3Handler) estimateGasDebank(ctx context.Context, in *gjson.Result) (interface{}, error) {
-	return svr.estimateGas(ctx, in)
+	bnh, err := parseDebankBlockContextHeight(in.Get("params.1"))
+	if err != nil {
+		return nil, err
+	}
+	bnRaw, err := json.Marshal(bnh)
+	if err != nil {
+		return nil, fmt.Errorf("debank: marshal block context: %w", err)
+	}
+	callRaw := in.Get("params.0").Raw
+	if callRaw == "" {
+		return nil, errInvalidFormat
+	}
+	synthetic := gjson.Parse(fmt.Sprintf(`{"params":[%s,%s]}`, callRaw, string(bnRaw)))
+	return svr.estimateGas(ctx, &synthetic)
 }
 
 // executeMultiCallOne runs one read-only call: protocol addr or contract.

@@ -508,6 +508,74 @@ func TestProtocolAddrSimulateResult_GasUsedZero(t *testing.T) {
 	require.Equal(0, out.Code)
 }
 
+// TestEstimateGasDebank_DebankBlockContextDoesNotPanic locks in the fix
+// for the writer-side panic where debank_estimateGas with a `{block_id, type}`
+// shaped params.1 used to nil-deref in blockNumberOrHashToHeight.
+//
+// Pre-fix: parseCallObject called rpc.BlockNumberOrHash.UnmarshalJSON on the
+// debank object, silently overwriting the LatestBlockNumber default with both
+// fields nil. estimateGas then dereferenced *bn.BlockNumber → HTTP 500 panic.
+// Pre-fix the panic only manifested for POLL/ROLLDPOS because the staking and
+// rewarding branches in ethTxToEnvelope error out earlier on "invalid abi
+// binary data"; for POLL the request fell through to BuildTransfer which
+// reached blockNumberOrHashToHeight.
+//
+// Post-fix: estimateGasDebank resolves the debank block context up front via
+// parseDebankBlockContextHeight and rebuilds the params payload eth-style
+// before delegating. blockNumberOrHashToHeight has a defensive nil guard as
+// belt-and-braces.
+func TestEstimateGasDebank_DebankBlockContextDoesNotPanic(t *testing.T) {
+	require := require.New(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	core := NewMockCoreService(ctrl)
+	web3svr := &web3Handler{core, nil, _defaultBatchRequestLimit}
+
+	// Wiring needed by estimateGas → ethTxToEnvelope → checkContractAddr →
+	// EstimateGasForNonExecution path. POLL is not a contract and not in
+	// the special staking/rewarding branches, so it falls through to
+	// BuildTransfer and eventually EstimateGasForNonExecution(*action.Transfer).
+	core.EXPECT().EVMNetworkID().Return(uint32(4689)).AnyTimes()
+	core.EXPECT().ChainID().Return(uint32(1)).AnyTimes()
+	core.EXPECT().Account(gomock.Any()).
+		Return(&iotextypes.AccountMeta{IsContract: false}, nil, nil).AnyTimes()
+	core.EXPECT().EstimateGasForNonExecution(gomock.Any()).
+		Return(uint64(21000), nil).AnyTimes()
+
+	// POLL protocol address — pre-fix HTTP 500 nil-ptr; post-fix returns 21000.
+	in := gjson.Parse(`{"params":[
+		{
+			"from":  "0xd776f4166ac8d757120864398312401b9c24dd0a",
+			"to":    "0x166b743c2c1a57c93c2e2bc3e169d28bbb9f6da3",
+			"gas":   "0x186a0",
+			"value": "0x0",
+			"input": "0x12345678"
+		},
+		{"block_id":"latest","type":"Equals"},
+		null
+	]}`)
+	out, err := web3svr.estimateGasDebank(context.Background(), &in)
+	require.NoError(err, "must not panic or error on debank-shape block context")
+	require.Equal("0x5208", out, "21000 gas (default for non-execution action)")
+
+	// Same flow with params.1 = null — also previously panicked because
+	// rpc.BlockNumberOrHash.UnmarshalJSON of "null" left both fields nil.
+	in2 := gjson.Parse(`{"params":[
+		{
+			"from":  "0xd776f4166ac8d757120864398312401b9c24dd0a",
+			"to":    "0x166b743c2c1a57c93c2e2bc3e169d28bbb9f6da3",
+			"gas":   "0x186a0",
+			"value": "0x0",
+			"input": "0x12345678"
+		},
+		null,
+		null
+	]}`)
+	out2, err := web3svr.estimateGasDebank(context.Background(), &in2)
+	require.NoError(err)
+	require.Equal("0x5208", out2)
+}
+
 // TestSimulateTransactionsDebank_BatchSizeLimit pins the 50-tx cap to
 // prevent a single request from monopolising the writer's working set.
 func TestSimulateTransactionsDebank_BatchSizeLimit(t *testing.T) {
