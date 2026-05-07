@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/iotexproject/go-pkgs/hash"
 	"github.com/iotexproject/iotex-proto/golang/iotexapi"
 	"github.com/iotexproject/iotex-proto/golang/iotextypes"
@@ -270,7 +272,8 @@ func TestSimulateTransactionsDebank_ProtocolAddrRouting(t *testing.T) {
 	resp := out.(debankSimulateResp)
 	require.Len(resp.Results, 1)
 	require.Equal(0, resp.Results[0].Code)
-	require.Equal(uint64(21000), resp.Results[0].GasUsed)
+	require.Equal(uint64(0), resp.Results[0].GasUsed,
+		"protocol-addr synthetic gas_used must be 0 (not 21000) — these calls bypass EVM and have no measured cost")
 	require.Len(resp.Results[0].Traces, 1, "protocol addr should emit one synthetic trace")
 	require.Equal("STATICCALL", resp.Results[0].Traces[0].CallType)
 	require.NotEmpty(resp.Results[0].Traces[0].Output, "protocol-addr trace should carry ABI-encoded output")
@@ -419,4 +422,110 @@ func TestSimulateBatchToDebank_ReceiptLogsToEvents(t *testing.T) {
 	require.Len(ev.Topics, 1)
 	require.Equal(common.BigToHash(big.NewInt(7)), ev.TxId)
 	require.Equal([]byte{0x01, 0x02}, []byte(ev.Data))
+}
+
+// TestMapReceiptStatusToDebankCode pins the EVM-receipt-status -> DeBank
+// error code table. Catches regressions where new EVM error codes are
+// added but the mapping is forgotten (ReadContract / ExecuteContract sets
+// receipt.Status with the actual EVM error and silently err=nil; without
+// this mapping a tx that OOG'd would be reported as success).
+func TestMapReceiptStatusToDebankCode(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  iotextypes.ReceiptStatus
+		revert  string
+		wantCod int
+		wantMsg string
+	}{
+		{"success", iotextypes.ReceiptStatus_Success, "", 0, ""},
+		{"reverted with reason", iotextypes.ReceiptStatus_ErrExecutionReverted, "boom", debankSimulateErrorReverted, "boom"},
+		{"reverted no reason", iotextypes.ReceiptStatus_ErrExecutionReverted, "", debankSimulateErrorReverted, "execution reverted"},
+		{"oog", iotextypes.ReceiptStatus_ErrOutOfGas, "", debankSimulateErrorGasExhausted, "out of gas"},
+		{"code store oog", iotextypes.ReceiptStatus_ErrCodeStoreOutOfGas, "", debankSimulateErrorGasExhausted, "out of gas"},
+		{"gas overflow", iotextypes.ReceiptStatus_ErrGasUintOverflow, "", debankSimulateErrorGasExhausted, "out of gas"},
+		{"insufficient balance", iotextypes.ReceiptStatus_ErrInsufficientBalance, "", debankSimulateErrorInsufficientBalance, "insufficient balance"},
+		{"not enough balance (200-series)", iotextypes.ReceiptStatus_ErrNotEnoughBalance, "", debankSimulateErrorInsufficientBalance, "insufficient balance"},
+		{"unknown evm error", iotextypes.ReceiptStatus_ErrUnknown, "", debankSimulateErrorUnknown, "evm receipt status 100"},
+		{"depth exceeded", iotextypes.ReceiptStatus_ErrDepth, "", debankSimulateErrorUnknown, "evm receipt status 103"},
+		{"invalid jump", iotextypes.ReceiptStatus_ErrInvalidJump, "", debankSimulateErrorUnknown, "evm receipt status 111"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCode, gotMsg := mapReceiptStatusToDebankCode(uint64(tc.status), tc.revert)
+			require.Equal(t, tc.wantCod, gotCode)
+			require.Equal(t, tc.wantMsg, gotMsg)
+		})
+	}
+}
+
+// TestSimulateBatchToDebank_RevertSuppressesEvents pins Ethereum semantics:
+// a reverted tx produces no events. Receipt.Logs() shouldn't leak into the
+// wire response under revert.
+func TestSimulateBatchToDebank_RevertSuppressesEvents(t *testing.T) {
+	require := require.New(t)
+	receipt := (&action.Receipt{
+		Status:      uint64(iotextypes.ReceiptStatus_ErrExecutionReverted),
+		GasConsumed: 12345,
+	}).SetExecutionRevertMsg("oops")
+	receipt.AddLogs(&action.Log{
+		Address: "io1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqd39ym7",
+		Topics:  []hash.Hash256{hash.Hash256b([]byte("Transfer"))},
+		Data:    []byte{0xff},
+	})
+
+	out := simulateBatchToDebank(&SimulateBatchResult{Receipt: receipt}, 1)
+	require.Equal(debankSimulateErrorReverted, out.Code)
+	require.Equal("oops", out.Err)
+	require.Empty(out.Events, "reverted tx must emit zero events")
+}
+
+// TestProtocolAddrSimulateResult_GasUsedZero pins that protocol-address
+// synthetic results report gas_used=0 (not 21000) — these calls bypass EVM
+// entirely and have no measured gas; downstream must not interpret the
+// value as a fee estimate.
+func TestProtocolAddrSimulateResult_GasUsedZero(t *testing.T) {
+	require := require.New(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	core := NewMockCoreService(ctrl)
+	web3svr := &web3Handler{core, nil, _defaultBatchRequestLimit}
+
+	amount := big.NewInt(42)
+	core.EXPECT().ReadState(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&iotexapi.ReadStateResponse{Data: []byte(amount.String())}, nil)
+
+	rewarding := common.HexToAddress("0xa576c141e5659137ddda4223d209d4744b2106be")
+	from := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	data := hexutil.Bytes{0xad, 0x7a, 0x67, 0x2f}
+	arg := &debankCallArgs{From: &from, To: &rewarding, Data: &data}
+
+	out, ok := web3svr.protocolAddrSimulateResult(arg, 0, 1)
+	require.True(ok)
+	require.Equal(uint64(0), out.GasUsed, "protocol addr synthetic gas_used must be 0, not 21000")
+	require.Equal(0, out.Code)
+}
+
+// TestSimulateTransactionsDebank_BatchSizeLimit pins the 50-tx cap to
+// prevent a single request from monopolising the writer's working set.
+func TestSimulateTransactionsDebank_BatchSizeLimit(t *testing.T) {
+	require := require.New(t)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	core := NewMockCoreService(ctrl)
+	web3svr := &web3Handler{core, nil, _defaultBatchRequestLimit}
+
+	// Build params with 51 entries (just over the cap)
+	var argsBuf strings.Builder
+	argsBuf.WriteString(`{"params":[[`)
+	for i := 0; i < debankBatchMaxSize+1; i++ {
+		if i > 0 {
+			argsBuf.WriteString(",")
+		}
+		argsBuf.WriteString(`{"from":"0x0000000000000000000000000000000000000001","to":"0x7c13866F9253DEf79e20034eDD011e1d69E67fe5","data":"0x"}`)
+	}
+	argsBuf.WriteString(`],{"block_id":"latest","type":"Equals"}]}`)
+
+	in := gjson.Parse(argsBuf.String())
+	_, err := web3svr.simulateTransactionsDebank(context.Background(), &in)
+	require.ErrorContains(err, "at most")
 }

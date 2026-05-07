@@ -15,16 +15,30 @@ import (
 	"github.com/iotexproject/iotex-proto/golang/iotextypes"
 	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 
 	"github.com/iotexproject/iotex-core/v2/action"
+	"github.com/iotexproject/iotex-core/v2/pkg/log"
 )
+
+// debankBatchMaxSize caps batch sizes for both simulate and contractMultiCall
+// to prevent a single request from monopolising the writer's working set.
+const debankBatchMaxSize = 50
 
 // simulateTransactionsDebank handles debank_simulateTransactions.
 // JSON-RPC params: [args []debankCallArgs, blockContext debankBlockContext, blockOverrides? *debankBlockOverrides]
+//
+// Note: any client-supplied `nonce` in args[i] is overwritten with the
+// sender's PendingNonce inside SimulateExecutionBatch — the cross-state
+// batch semantics require auto-advancing nonces, so honoring an explicit
+// nonce would break ordering between consecutive txs from the same sender.
 func (svr *web3Handler) simulateTransactionsDebank(ctx context.Context, in *gjson.Result) (interface{}, error) {
 	args, err := parseDebankCallArgsArray(in.Get("params.0"))
 	if err != nil {
 		return nil, err
+	}
+	if len(args) > debankBatchMaxSize {
+		return nil, errors.Errorf("debank: simulateTransactions accepts at most %d calls", debankBatchMaxSize)
 	}
 	bnh, err := parseDebankBlockContextHeight(in.Get("params.1"))
 	if err != nil {
@@ -89,8 +103,8 @@ func (svr *web3Handler) contractMultiCallDebank(ctx context.Context, in *gjson.R
 	if err != nil {
 		return nil, err
 	}
-	if len(args) > 50 {
-		return nil, errors.New("debank: contractMultiCall accepts at most 50 calls")
+	if len(args) > debankBatchMaxSize {
+		return nil, errors.Errorf("debank: contractMultiCall accepts at most %d calls", debankBatchMaxSize)
 	}
 	bnh, err := parseDebankBlockContextHeight(in.Get("params.1"))
 	if err != nil {
@@ -101,22 +115,25 @@ func (svr *web3Handler) contractMultiCallDebank(ctx context.Context, in *gjson.R
 		return nil, err
 	}
 
-	results := make([]*debankSingleCallResult, len(args))
-	for i := range args {
-		results[i] = svr.executeMultiCallOne(ctx, &args[i], height, archive)
-	}
-
-	stats := &debankMultiCallStats{
-		Success:      true,
-		CacheEnabled: false,
-	}
+	// Lock stats height BEFORE running the loop so it matches the snapshot
+	// the per-call ReadContract reads from, not whatever the chain has
+	// advanced to mid-batch.
 	tipHeight := height
 	if !archive || tipHeight == 0 {
 		tipHeight = svr.coreService.TipHeight()
 	}
-	stats.BlockNum = tipHeight
+	stats := &debankMultiCallStats{
+		BlockNum:     tipHeight,
+		Success:      true,
+		CacheEnabled: false,
+	}
 	if blkHash, err := svr.coreService.BlockHashByBlockHeight(tipHeight); err == nil {
 		stats.BlockHash = common.BytesToHash(blkHash[:])
+	}
+
+	results := make([]*debankSingleCallResult, len(args))
+	for i := range args {
+		results[i] = svr.executeMultiCallOne(ctx, &args[i], height, archive)
 	}
 	for _, r := range results {
 		if r.Code != 0 {
@@ -212,18 +229,49 @@ func (svr *web3Handler) executeMultiCallOne(
 	}
 	if receipt != nil {
 		r.GasUsed = int64(receipt.GetGasConsumed())
-		if receipt.GetStatus() == uint64(iotextypes.ReceiptStatus_ErrExecutionReverted) {
-			r.Code = debankSimulateErrorReverted
-			r.Err = receipt.GetExecutionRevertMsg()
-			if r.Err == "" {
-				r.Err = "execution reverted"
-			}
-		}
+		r.Code, r.Err = mapReceiptStatusToDebankCode(receipt.GetStatus(), receipt.GetExecutionRevertMsg())
 	}
 	if raw, decErr := hex.DecodeString(strip0x(ret)); decErr == nil {
 		r.Result = raw
 	}
 	return r
+}
+
+// mapReceiptStatusToDebankCode translates an IoTeX receipt status (and the
+// optional revert message) into a DeBank wire error code + message. Covers
+// the EVM error families that map cleanly:
+//
+//   - Success (1)                                -> 0
+//   - ErrExecutionReverted (106)                 -> -39000 with revert reason
+//   - ErrOutOfGas (101) / ErrCodeStoreOutOfGas (102) /
+//     ErrGasUintOverflow (113)                   -> -39001 GasExhausted
+//   - ErrInsufficientBalance (110) /
+//     ErrNotEnoughBalance (201)                  -> -39002 BalanceExhausted
+//   - everything else (incl. ErrUnknown 100,
+//     ErrDepth 103, business-layer 200+)         -> -39004 Unknown
+//
+// Returning the status number in the err string for the catch-all branch
+// keeps writer-side bugs traceable downstream rather than swallowing them
+// behind a generic "unknown" message.
+func mapReceiptStatusToDebankCode(status uint64, revertMsg string) (code int, errMsg string) {
+	switch status {
+	case uint64(iotextypes.ReceiptStatus_Success):
+		return 0, ""
+	case uint64(iotextypes.ReceiptStatus_ErrExecutionReverted):
+		if revertMsg == "" {
+			return debankSimulateErrorReverted, "execution reverted"
+		}
+		return debankSimulateErrorReverted, revertMsg
+	case uint64(iotextypes.ReceiptStatus_ErrOutOfGas),
+		uint64(iotextypes.ReceiptStatus_ErrCodeStoreOutOfGas),
+		uint64(iotextypes.ReceiptStatus_ErrGasUintOverflow):
+		return debankSimulateErrorGasExhausted, "out of gas"
+	case uint64(iotextypes.ReceiptStatus_ErrInsufficientBalance),
+		uint64(iotextypes.ReceiptStatus_ErrNotEnoughBalance):
+		return debankSimulateErrorInsufficientBalance, "insufficient balance"
+	default:
+		return debankSimulateErrorUnknown, fmt.Sprintf("evm receipt status %d", status)
+	}
 }
 
 // simulateBatchToDebank converts SimulateBatchResult into the wire-level
@@ -246,13 +294,18 @@ func simulateBatchToDebank(r *SimulateBatchResult, txIdx int64) debankSingleSimu
 		return out
 	}
 	out.GasUsed = r.Receipt.GasConsumed
-	if r.Receipt.Status == uint64(iotextypes.ReceiptStatus_ErrExecutionReverted) {
-		out.Code = debankSimulateErrorReverted
-		out.Err = r.Receipt.ExecutionRevertMsg()
-		if out.Err == "" {
-			out.Err = "execution reverted"
-		}
+	out.Code, out.Err = mapReceiptStatusToDebankCode(r.Receipt.Status, r.Receipt.ExecutionRevertMsg())
+
+	// Always attach traces (callFrame tree carries useful debugging context
+	// even on revert), but skip events on revert per Ethereum semantics —
+	// reverted txs emit no logs.
+	if traces := flattenCallFrames(r.TraceData, txIdx); len(traces) > 0 {
+		out.Traces = traces
 	}
+	if out.Code == debankSimulateErrorReverted {
+		return out
+	}
+
 	txIDHash := common.BigToHash(big.NewInt(txIdx))
 	for _, lg := range r.Receipt.Logs() {
 		ev := debankEvent{
@@ -268,9 +321,6 @@ func simulateBatchToDebank(r *SimulateBatchResult, txIdx int64) debankSingleSimu
 			}
 		}
 		out.Events = append(out.Events, ev)
-	}
-	if traces := flattenCallFrames(r.TraceData, txIdx); len(traces) > 0 {
-		out.Traces = traces
 	}
 	return out
 }
@@ -301,8 +351,13 @@ func (svr *web3Handler) protocolAddrSimulateResult(arg *debankCallArgs, height u
 		fromHex = "0x" + hex.EncodeToString(arg.From.Bytes())
 	}
 	toHex := "0x" + hex.EncodeToString(arg.To.Bytes())
+	// gas_used = 0 to make it explicit that ABI-dispatched protocol-address
+	// calls don't run through EVM and thus have no measured gas cost.
+	// Downstream clients MUST NOT interpret this as a fee estimate; the real
+	// cost is whatever ReadState() consumes inside the writer, which is not
+	// surfaced as gas.
 	out := &debankSingleSimulateResult{
-		GasUsed: 21000,
+		GasUsed: 0,
 		Traces:  []debankTrace{},
 		Events:  []debankEvent{},
 	}
@@ -351,6 +406,11 @@ func flattenCallFrames(data json.RawMessage, txIdx int64) []debankTrace {
 	}
 	var root callFrame
 	if err := json.Unmarshal(data, &root); err != nil {
+		// Tracer output shape changed (revm/alloy upgrade?) or got
+		// truncated. Returning nil leaves traces[] empty rather than
+		// crashing the batch, but we want a signal so this isn't silent.
+		log.Logger("api").Warn("debank: failed to decode callTracer JSON",
+			zap.Error(err), zap.Int64("tx_idx", txIdx))
 		return nil
 	}
 	txID := common.BigToHash(big.NewInt(txIdx))
