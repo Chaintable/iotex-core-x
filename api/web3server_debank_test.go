@@ -36,6 +36,7 @@ func TestContractMultiCallDebank_ProtocolAddr(t *testing.T) {
 		Return(&iotexapi.ReadStateResponse{Data: []byte(amount.String())}, nil)
 	core.EXPECT().TipHeight().Return(uint64(999)).AnyTimes()
 	core.EXPECT().BlockHashByBlockHeight(uint64(999)).Return(hash.ZeroHash256, nil).AnyTimes()
+	core.EXPECT().BlockByHash(gomock.Any()).Return(nil, nil).AnyTimes()
 
 	in := gjson.Parse(`{"params":[
 		[{
@@ -76,6 +77,7 @@ func TestContractMultiCallDebank_RegularContract(t *testing.T) {
 		Return("deadbeef", receipt, nil)
 	core.EXPECT().TipHeight().Return(uint64(50)).AnyTimes()
 	core.EXPECT().BlockHashByBlockHeight(uint64(50)).Return(hash.ZeroHash256, nil).AnyTimes()
+	core.EXPECT().BlockByHash(gomock.Any()).Return(nil, nil).AnyTimes()
 
 	in := gjson.Parse(`{"params":[
 		[{
@@ -112,6 +114,7 @@ func TestContractMultiCallDebank_RevertMapsErrorCode(t *testing.T) {
 		Return("", receipt, nil)
 	core.EXPECT().TipHeight().Return(uint64(1)).AnyTimes()
 	core.EXPECT().BlockHashByBlockHeight(gomock.Any()).Return(hash.ZeroHash256, nil).AnyTimes()
+	core.EXPECT().BlockByHash(gomock.Any()).Return(nil, nil).AnyTimes()
 
 	in := gjson.Parse(`{"params":[
 		[{"to":"0x7c13866F9253DEf79e20034eDD011e1d69E67fe5","data":"0x1234"}],

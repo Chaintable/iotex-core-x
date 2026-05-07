@@ -129,6 +129,12 @@ func (svr *web3Handler) contractMultiCallDebank(ctx context.Context, in *gjson.R
 	}
 	if blkHash, err := svr.coreService.BlockHashByBlockHeight(tipHeight); err == nil {
 		stats.BlockHash = common.BytesToHash(blkHash[:])
+		// Pull the block timestamp via BlockByHash. simulateTransactionsDebank
+		// gets this for free from SimulateExecutionBatch's bcCtx.Tip.Timestamp;
+		// multiCall doesn't go through that path, so resolve it here.
+		if blk, err := svr.coreService.BlockByHash(hex.EncodeToString(blkHash[:])); err == nil && blk != nil && blk.Block != nil {
+			stats.BlockTime = blk.Block.Timestamp().Unix()
+		}
 	}
 
 	results := make([]*debankSingleCallResult, len(args))
@@ -366,7 +372,7 @@ func (svr *web3Handler) protocolAddrSimulateResult(arg *debankCallArgs, height u
 		out.Err = perr.Error()
 		out.Traces = append(out.Traces, debankTrace{
 			ID: "0", From: fromHex, To: toHex, Input: data,
-			Gas: new(big.Int), GasUsed: new(big.Int),
+			Gas: new(big.Int), GasUsed: new(big.Int), Value: new(hexutil.Big),
 			CallCreateType: "call", CallType: "STATICCALL",
 			TxID: txID,
 		})
@@ -375,7 +381,7 @@ func (svr *web3Handler) protocolAddrSimulateResult(arg *debankCallArgs, height u
 	rawBytes, _ := hex.DecodeString(strip0x(raw))
 	out.Traces = append(out.Traces, debankTrace{
 		ID: "0", From: fromHex, To: toHex, Input: data, Output: rawBytes,
-		Gas: new(big.Int), GasUsed: new(big.Int),
+		Gas: new(big.Int), GasUsed: new(big.Int), Value: new(hexutil.Big),
 		CallCreateType: "call", CallType: "STATICCALL",
 		TxID: txID,
 	})
@@ -431,6 +437,14 @@ func callFrameToDebankTrace(f *callFrame, id, parentID string, pos int64, txID c
 	if f.To != nil {
 		toStr = "0x" + hex.EncodeToString(f.To.Bytes())
 	}
+	// callTracer omits `value` for sub-calls that don't transfer (STATICCALL,
+	// DELEGATECALL, zero-value CALL); f.Value is then nil and would marshal
+	// to JSON `null`, breaking leafage's U256 deserializer (which expects
+	// "0x0"). Default to a zero hexutil.Big.
+	val := f.Value
+	if val == nil {
+		val = new(hexutil.Big)
+	}
 	cct, ct := classifyCallType(f.Type)
 	return debankTrace{
 		ID:               id,
@@ -438,7 +452,7 @@ func callFrameToDebankTrace(f *callFrame, id, parentID string, pos int64, txID c
 		Gas:              new(big.Int).SetUint64(uint64(f.Gas)),
 		Input:            f.Input,
 		To:               toStr,
-		Value:            f.Value,
+		Value:            val,
 		GasUsed:          new(big.Int).SetUint64(uint64(f.GasUsed)),
 		Output:           f.Output,
 		CallCreateType:   cct,
