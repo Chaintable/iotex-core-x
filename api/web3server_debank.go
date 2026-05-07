@@ -478,6 +478,14 @@ func classifyCallType(t string) (string, string) {
 
 // buildEnvelopeFromDebankCallArgs converts a debankCallArgs into an Envelope
 // + caller for SimulateExecutionBatch.
+//
+// Note on gas price: the simulate batch path uses ReadOnly=false so EVM
+// advances state; that means the EIP-1559 / IoTeX gas-split logic checks
+// `envelope.GasPrice >= block.BaseFee`. If the client doesn't supply a
+// price, an envelope with GasPrice=0 fails with "failed to split gas: fee
+// cap less than base fee". SimulateExecutionBatch therefore back-fills a
+// safe default (block BaseFee) when the client omits the price; here we
+// just propagate whatever the client provided.
 func buildEnvelopeFromDebankCallArgs(arg *debankCallArgs) (address.Address, action.Envelope, error) {
 	caller, err := callerFromDebankFrom(arg.From)
 	if err != nil {
@@ -502,9 +510,23 @@ func buildEnvelopeFromDebankCallArgs(arg *debankCallArgs) (address.Address, acti
 	if arg.Gas != nil {
 		gasLimit = uint64(*arg.Gas)
 	}
+	// Default gas price: IoTeX mainnet baseFee is 1000 gwei (1e12 wei) per the
+	// genesis config and is not adjusted dynamically. ReadOnly=false in the
+	// batch simulation triggers IoTeX's gas-split check, which fails with
+	// "failed to split gas: fee cap less than base fee" when GasPrice=0.
+	// Honor the client value when supplied; fall back to the chain baseFee
+	// otherwise.
+	const defaultBaseFeeWei = "0xe8d4a51000" // 1000 gwei
+	gasPrice, _ := new(big.Int).SetString("0xe8d4a51000"[2:], 16)
+	if arg.GasPrice != nil && arg.GasPrice.ToInt().Sign() > 0 {
+		gasPrice = arg.GasPrice.ToInt()
+	}
+	_ = defaultBaseFeeWei // kept as a doc anchor; gasPrice is computed above
 	elp := (&action.EnvelopeBuilder{}).
 		SetAction(action.NewExecution(toAddr.String(), value, data)).
-		SetGasLimit(gasLimit).Build()
+		SetGasLimit(gasLimit).
+		SetGasPrice(gasPrice).
+		Build()
 	return caller, elp, nil
 }
 
