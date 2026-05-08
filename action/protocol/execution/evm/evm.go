@@ -271,13 +271,10 @@ func ExecuteContract(
 			}
 		}
 	}
-	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM START height=%d ts=%s baseFee=%v gasLimit=%d simulate=%v readOnly=%v",
-		ps.blkCtx.BlockHeight, ps.blkCtx.BlockTimeStamp, ps.blkCtx.BaseFee, ps.blkCtx.GasLimit, ps.blkCtx.Simulate, ps.actionCtx.ReadOnly)
 	retval, depositGas, remainingGas, contractAddress, statusCode, err := executeInEVM(ctx, ps, stateDB)
 	if err != nil {
 		return nil, nil, err
 	}
-	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM done status=%d remainingGas=%d contract=%v", statusCode, remainingGas, contractAddress)
 	receipt := &action.Receipt{
 		GasConsumed:       ps.gas - remainingGas,
 		BlockHeight:       ps.blkCtx.BlockHeight,
@@ -611,7 +608,6 @@ func executeInEVM(ctx context.Context, evmParams *Params, stateDB stateDB) ([]by
 		ret, remainingGas, evmErr = evm.Call(executor, *evmParams.contract, evmParams.data, remainingGas, amount)
 	}
 	if evmErr != nil {
-		log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM evmErr=%v retLen=%d retHex=%x", evmErr, len(ret), ret)
 		log.T(ctx).Debug("evm error", zap.Error(evmErr))
 		// The only possible consensus-error would be if there wasn't
 		// sufficient balance to make the transfer happen.

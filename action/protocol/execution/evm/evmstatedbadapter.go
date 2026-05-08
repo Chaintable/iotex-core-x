@@ -290,10 +290,6 @@ func (stateDB *StateDBAdapter) accountCreationOpts() []state.AccountCreationOpti
 
 // CreateAccount creates an account in iotx blockchain
 func (stateDB *StateDBAdapter) CreateAccount(evmAddr common.Address) {
-	// probe: always log CreateAccount for target range to track CREATE flow
-	existing := stateDB.GetCodeHash(evmAddr)
-	log.S().Infof("[DEBANK_DBG_CREATE] CreateAccount addr=%x preCodeHash=%x preNonce=%d",
-		evmAddr[:], existing[:8], stateDB.GetNonce(evmAddr))
 	addr, err := address.FromBytes(evmAddr.Bytes())
 	if stateDB.assertError(err, "Failed to convert evm address.", zap.Error(err)) {
 		return
@@ -762,17 +758,6 @@ func (stateDB *StateDBAdapter) RevertToSnapshot(snapshot int) {
 		}
 	}
 	// restore modified contracts
-	{
-		before := make([]string, 0, len(stateDB.cachedContract))
-		for a := range stateDB.cachedContract {
-			before = append(before, fmt.Sprintf("%x", a[:4]))
-		}
-		after := make([]string, 0, len(stateDB.contractSnapshot[snapshot]))
-		for a := range stateDB.contractSnapshot[snapshot] {
-			after = append(after, fmt.Sprintf("%x", a[:4]))
-		}
-		log.S().Infof("[DEBANK_DBG_CREATE] RevertToSnapshot sn=%d before=%v after=%v", snapshot, before, after)
-	}
 	stateDB.cachedContract = stateDB.contractSnapshot[snapshot]
 	for _, addr := range stateDB.cachedContractAddrs() {
 		c := stateDB.cachedContract[addr]
@@ -824,11 +809,6 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 		}
 	}
 	sn := stateDB.sm.Snapshot()
-	addrs := make([]string, 0, len(c))
-	for a := range c {
-		addrs = append(addrs, fmt.Sprintf("%x", a[:4]))
-	}
-	log.S().Infof("[DEBANK_DBG_CREATE] Snapshot sn=%d cachedContract=%v", sn, addrs)
 	if _, ok := stateDB.selfDestructedSnapshot[sn]; ok {
 		err := errors.New("unexpected error: duplicate snapshot version")
 		if stateDB.fixSnapshotOrder {
@@ -1139,13 +1119,6 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 	for addr := range stateDB.cachedContract {
 		contractAddrs = append(contractAddrs, addr)
 	}
-	{
-		addrs := make([]string, 0, len(contractAddrs))
-		for _, a := range contractAddrs {
-			addrs = append(addrs, fmt.Sprintf("%x", a[:4]))
-		}
-		log.S().Infof("[DEBANK_DBG_CREATE] CommitContracts entry cachedContract count=%d first=%v", len(contractAddrs), addrs)
-	}
 	sort.Slice(contractAddrs, func(i, j int) bool { return bytes.Compare(contractAddrs[i][:], contractAddrs[j][:]) < 0 })
 
 	for _, addr := range contractAddrs {
@@ -1280,11 +1253,8 @@ func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.Pipeline
 	// contract branch above.
 	erigonC, ok := c.(*contractErigon)
 	if !ok {
-		log.S().Infof("[DEBANK_DBG_CREATE] collectPreCommitDiff UNKNOWN contract type %T addr=%x", c, addr[:])
 		return
 	}
-	log.S().Infof("[DEBANK_DBG_CREATE] collectPreCommitDiff erigon addr=%x dirtyCode=%v cacheLen=%d committedN=%d",
-		addr[:], erigonC.dirtyCode, len(erigonC.code), len(erigonC.committed))
 	if len(erigonC.committed) > 0 {
 		storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
 		for key := range erigonC.committed {
@@ -1345,14 +1315,6 @@ func (stateDB *StateDBAdapter) StateDiff() (
 		destructs[crypto.Keccak256Hash(addr[:])] = struct{}{}
 	}
 
-	{
-		addrs := make([]string, 0, len(stateDB.cachedContract))
-		for a := range stateDB.cachedContract {
-			addrs = append(addrs, fmt.Sprintf("%x", a[:4]))
-		}
-		log.S().Infof("[DEBANK_DBG_CREATE] StateDiff entry cachedContract count=%d first=%v", len(addrs), addrs)
-	}
-
 	// contracts: storages + codes + accounts
 	for addr, c := range stateDB.cachedContract {
 		if _, ok := stateDB.selfDestructed[addr]; ok {
@@ -1384,8 +1346,6 @@ func (stateDB *StateDBAdapter) StateDiff() (
 				codes[codeHash] = common.CopyBytes(inner.code)
 			}
 		} else if erigonC, ok := c.(*contractErigon); ok {
-			log.S().Infof("[DEBANK_DBG_CREATE] StateDiff erigon addr=%x dirtyCode=%v cacheLen=%d committedN=%d",
-				addr[:], erigonC.dirtyCode, len(erigonC.code), len(erigonC.committed))
 			// Erigon-backed contract (used in trace_debankBlock replay dryrun path)
 			if len(erigonC.committed) > 0 {
 				storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
