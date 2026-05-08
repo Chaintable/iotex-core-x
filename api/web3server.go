@@ -263,6 +263,12 @@ func (svr *web3Handler) handleWeb3Req(ctx context.Context, web3Req *gjson.Result
 		res, err = svr.debankBlock(ctx, web3Req)
 	case "trace_debankBlockWithDebug":
 		res, err = svr.debankBlockWithDebug(ctx, web3Req)
+	case "debank_simulateTransactions":
+		res, err = svr.simulateTransactionsDebank(ctx, web3Req)
+	case "debank_contractMultiCall":
+		res, err = svr.contractMultiCallDebank(ctx, web3Req)
+	case "debank_estimateGas":
+		res, err = svr.estimateGasDebank(ctx, web3Req)
 	case "debug_traceTransaction":
 		res, err = svr.traceTransaction(ctx, web3Req)
 	case "debug_traceCall":
@@ -468,6 +474,52 @@ func (svr *web3Handler) getTransactionCount(in *gjson.Result) (interface{}, erro
 	return uint64ToHex(pendingNonce), nil
 }
 
+// callProtocolAddr handles eth_call routed to an IoTeX protocol address
+// (staking/rewarding/poll/rolldpos). Returns (result, true, err) when handled;
+// ("", false, nil) for non-protocol addrs so the caller falls back to EVM.
+func (svr *web3Handler) callProtocolAddr(to string, data []byte, height uint64) (string, bool, error) {
+	var (
+		proto     string
+		heightStr string
+		sctx      protocol.StateContext
+		err       error
+	)
+	switch to {
+	case address.StakingProtocolAddr:
+		proto = "staking"
+		if height > 0 {
+			heightStr = strconv.FormatUint(height, 10)
+		}
+		sctx, err = stakingabi.BuildReadStateRequest(data)
+	case address.RewardingProtocol:
+		proto = "rewarding"
+		if height > 0 {
+			heightStr = strconv.FormatUint(height, 10)
+		}
+		sctx, err = rewardingabi.BuildReadStateRequest(data)
+	case address.PollProtocol:
+		proto = "poll"
+		sctx, err = pollingabi.BuildReadStateRequest(data)
+	case address.RollDPoSProtocol:
+		proto = "rolldpos"
+		sctx, err = rolldposabi.BuildReadStateRequest(data)
+	default:
+		return "", false, nil
+	}
+	if err != nil {
+		return "", true, err
+	}
+	states, err := svr.coreService.ReadState(proto, heightStr, sctx.Parameters().MethodName, sctx.Parameters().Arguments)
+	if err != nil {
+		return "", true, err
+	}
+	ret, err := sctx.EncodeToEth(states)
+	if err != nil {
+		return "", true, err
+	}
+	return "0x" + ret, true, nil
+}
+
 func (svr *web3Handler) call(ctx context.Context, in *gjson.Result) (interface{}, error) {
 	callMsg, err := parseCallObject(in)
 	if err != nil {
@@ -481,72 +533,11 @@ func (svr *web3Handler) call(ctx context.Context, in *gjson.Result) (interface{}
 	if err != nil {
 		return nil, err
 	}
-	heightStr := ""
-	if height > 0 {
-		heightStr = strconv.FormatUint(height, 10)
-	}
 	if to == _metamaskBalanceContractAddr {
 		return nil, nil
 	}
-	if to == address.StakingProtocolAddr {
-		sctx, err := stakingabi.BuildReadStateRequest(data)
-		if err != nil {
-			return nil, err
-		}
-		states, err := svr.coreService.ReadState("staking", heightStr, sctx.Parameters().MethodName, sctx.Parameters().Arguments)
-		if err != nil {
-			return nil, err
-		}
-		ret, err := sctx.EncodeToEth(states)
-		if err != nil {
-			return nil, err
-		}
-		return "0x" + ret, nil
-	}
-	if to == address.RewardingProtocol {
-		sctx, err := rewardingabi.BuildReadStateRequest(data)
-		if err != nil {
-			return nil, err
-		}
-		states, err := svr.coreService.ReadState("rewarding", heightStr, sctx.Parameters().MethodName, sctx.Parameters().Arguments)
-		if err != nil {
-			return nil, err
-		}
-		ret, err := sctx.EncodeToEth(states)
-		if err != nil {
-			return nil, err
-		}
-		return "0x" + ret, nil
-	}
-	if to == address.PollProtocol {
-		sctx, err := pollingabi.BuildReadStateRequest(data)
-		if err != nil {
-			return nil, err
-		}
-		states, err := svr.coreService.ReadState("poll", "", sctx.Parameters().MethodName, sctx.Parameters().Arguments)
-		if err != nil {
-			return nil, err
-		}
-		ret, err := sctx.EncodeToEth(states)
-		if err != nil {
-			return nil, err
-		}
-		return "0x" + ret, nil
-	}
-	if to == address.RollDPoSProtocol {
-		sctx, err := rolldposabi.BuildReadStateRequest(data)
-		if err != nil {
-			return nil, err
-		}
-		states, err := svr.coreService.ReadState("rolldpos", "", sctx.Parameters().MethodName, sctx.Parameters().Arguments)
-		if err != nil {
-			return nil, err
-		}
-		ret, err := sctx.EncodeToEth(states)
-		if err != nil {
-			return nil, err
-		}
-		return "0x" + ret, nil
+	if result, handled, err := svr.callProtocolAddr(to, data, height); handled {
+		return result, err
 	}
 	var (
 		elp = (&action.EnvelopeBuilder{}).SetAction(action.NewExecution(to, callMsg.Value, data)).
