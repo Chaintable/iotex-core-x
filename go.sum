@@ -52,10 +52,12 @@ github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260210121649-5e2059cfbb3a h1:/3ntEELhJ1dmYs3rMzx8SsW/7fYNPyj5tmsevW/PmDI=
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260210121649-5e2059cfbb3a/go.mod h1:G6hio43rLWAF8Ao6tOUJsKKcsW0IBpCNbmNuaO5B5ro=
-github.com/Chaintable/pipeline v0.0.64-0.20260203032459-7dd4eff3d100 h1:KNpCYulHomKiZW9C9Sxl/6C+XnXxa30B8I2B1ee+ltc=
-github.com/Chaintable/pipeline v0.0.64-0.20260203032459-7dd4eff3d100/go.mod h1:1L/v5FvHyqI5F+1rbEjgLnlCzGYDPUa33aAi13+0hLk=
-github.com/Chaintable/pipeline v0.0.64-0.20260211023043-02531857cadd h1:MzKkhjeW4bIfZki59gdgW50TAh/GQIvAQqbdsBnTbCs=
-github.com/Chaintable/pipeline v0.0.64-0.20260211023043-02531857cadd/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
+github.com/Chaintable/pipeline v0.0.64-0.20260302065725-712e3daf8476 h1:iSiuduhSGjqNkCVSPwgHyfoGaANbKl6SI6Zg1En2KmE=
+github.com/Chaintable/pipeline v0.0.64-0.20260302065725-712e3daf8476/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
+github.com/Chaintable/pipeline v0.0.64-0.20260413142006-97f0506d87c2 h1:vVZpMDPIRu67d5zKO7sZgKcJanyBoo/gHdGtPcIuERk=
+github.com/Chaintable/pipeline v0.0.64-0.20260413142006-97f0506d87c2/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
+github.com/Chaintable/pipeline v0.0.64-0.20260413162337-9fb92e7be04e h1:sSZ0rwNd0uvaAMd5cI2gvRk1/8dZBwTNfpvzXLnfgDk=
+github.com/Chaintable/pipeline v0.0.64-0.20260413162337-9fb92e7be04e/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
 github.com/CloudyKit/fastprinter v0.0.0-20170127035650-74b38d55f37a/go.mod h1:EFZQ978U7x8IRnstaskI3IysnWY5Ao3QgZUKOXlsAdw=
 github.com/CloudyKit/jet v2.1.3-0.20180809161101-62edd43e4f88+incompatible/go.mod h1:HPYO+50pSWkPoj9Q/eq0aRGByCL6ScRlUmiEX5Zgm+w=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=

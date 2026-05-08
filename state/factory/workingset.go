@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"runtime"
 	"sort"
 	"time"
 
@@ -83,6 +84,8 @@ type (
 		txValidator            *protocol.GenericValidator
 		receipts               []*action.Receipt
 		stateDiffCollector     *protocol.PipelineStateDiffCollector
+		stateDiffEntries       []WriteQueueEntry // captured write queue for state diff broadcasting (v2.3.8 ioSwarm)
+		stateDiffDigest        []byte            // cached digest bytes for state diff callback (v2.3.8 ioSwarm)
 	}
 )
 
@@ -210,13 +213,51 @@ func (ws *workingSet) runAction(
 		return nil, err
 	}
 	fCtx := protocol.MustGetFeatureCtx(ctx)
-	traceErr := evm.TraceStart(ctx, ws, selp.Envelope)
+	// Per-action state diff collector snapshot for Simulate-mode rollback.
+	// If an action fails and Simulate mode skips it (see process:763 /
+	// runActionsLegacy:891), the writes that the handler made before failing
+	// would otherwise remain in collector.Accounts / .Destructs as "ghost"
+	// entries. Snapshot here, and on the defer below either discard (success)
+	// or revert (failure) to the pre-action state.
+	collector := protocol.GetStateDiffCollectorCtx(ctx)
+	collectorSnap := -1
+	if collector != nil {
+		collectorSnap = collector.Snapshot()
+	}
+	// TraceStart returns a cleanup closure that MUST run exactly once per
+	// CaptureTxStart to keep the tracer frame-balanced. We defer it here and
+	// pass the named `receipt` and `err` return values — the closure branches
+	// on receipt==nil to run either the full end-of-action sequence or the
+	// minimal frame-close sequence. See TraceCleanup's docstring.
+	traceCleanup, traceErr := evm.TraceStart(ctx, ws, selp.Envelope)
 	if traceErr != nil {
 		log.L().Error("failed to start tracing EVM execution", zap.Error(traceErr))
 	}
+	defer func() {
+		if traceErr == nil && traceCleanup != nil {
+			traceCleanup(receipt)
+		}
+		if collector != nil && collectorSnap >= 0 {
+			if receipt != nil && err == nil {
+				collector.DiscardSnapshot(collectorSnap)
+			} else {
+				collector.Revert(collectorSnap)
+			}
+		}
+	}()
+	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, actionHandler := range reg.All() {
 		receipt, err = actionHandler.Handle(ctx, selp.Envelope, ws)
 		if err != nil {
+			if blkCtx.Simulate && receipt == nil {
+				// In Simulate mode, a protocol handler (e.g. staking) may fail
+				// because ReadView returns nil on archive erigon state. If receipt
+				// is nil, this handler didn't claim the action — try the next one.
+				log.L().Debug("handler error in simulate mode, trying next",
+					zap.String("handler", actionHandler.Name()), zap.Error(err))
+				err = nil
+				continue
+			}
 			return nil, errors.Wrapf(
 				err,
 				"error when action %x mutates states",
@@ -229,9 +270,6 @@ func (ws *workingSet) runAction(
 	}
 	if receipt == nil {
 		return nil, errors.New("receipt is empty")
-	}
-	if traceErr == nil {
-		evm.TraceEnd(ctx, ws, selp.Envelope, receipt)
 	}
 	if fCtx.EnableBlobTransaction && len(selp.BlobHashes()) > 0 {
 		if err = ws.handleBlob(ctx, selp, receipt); err != nil {
@@ -301,8 +339,29 @@ func (ws *workingSet) finalize(ctx context.Context) error {
 	if err := ws.store.Finalize(ctx); err != nil {
 		return err
 	}
+	// Capture write queue entries and digest for state diff broadcasting.
+	// Must happen after Finalize (which writes height) but before Commit (which flushes).
+	if sdbStore := ws.getStateDBStore(); sdbStore != nil {
+		ws.stateDiffEntries = sdbStore.CaptureWriteQueue()
+		d := sdbStore.Digest()
+		ws.stateDiffDigest = d[:]
+	}
 	ws.finalized = true
 
+	return nil
+}
+
+// getStateDBStore extracts the underlying *stateDBWorkingSetStore,
+// handling both direct and wrapped (workingSetStoreWithSecondary) cases.
+func (ws *workingSet) getStateDBStore() *stateDBWorkingSetStore {
+	if s, ok := ws.store.(*stateDBWorkingSetStore); ok {
+		return s
+	}
+	if s, ok := ws.store.(*workingSetStoreWithSecondary); ok {
+		if inner, ok := s.writer.(*stateDBWorkingSetStore); ok {
+			return inner
+		}
+	}
 	return nil
 }
 
@@ -363,6 +422,14 @@ func (ws *workingSet) Commit(ctx context.Context, retention uint64) error {
 	if err := protocolPreCommit(ctx, ws); err != nil {
 		return err
 	}
+	// Compute digest BEFORE store.Commit() because the trieless state DB's
+	// Digest() hashes the pending write queue, which becomes empty after Flush().
+	// Post-commit Digest() always returns Keccak256(empty), losing the real state root.
+	var preCommitDigest hash.Hash256
+	var preCommitDigestErr error
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnCommit != nil {
+		preCommitDigest, preCommitDigestErr = ws.digest()
+	}
 	if err := ws.store.Commit(ctx, retention); err != nil {
 		return err
 	}
@@ -372,11 +439,10 @@ func (ws *workingSet) Commit(ctx context.Context, retention uint64) error {
 			collector = protocol.GetStateDiffCollectorCtx(ctx)
 		}
 		if collector != nil {
-			digest, err := ws.digest()
-			if err != nil {
-				return err
+			if preCommitDigestErr != nil {
+				return preCommitDigestErr
 			}
-			root := common.BytesToHash(digest[:])
+			root := common.BytesToHash(preCommitDigest[:])
 			var originRoot common.Hash
 			if bcCtx, ok := protocol.GetBlockchainCtx(ctx); ok {
 				originRoot = common.BytesToHash(bcCtx.Tip.StateDigest[:])
@@ -497,18 +563,60 @@ func (ws *workingSet) collectAccountDiffOnPut(cfg *protocol.StateConfig, s inter
 	}
 	addrHash := crypto.Keccak256Hash(cfg.Key)
 	gethAcc := types.StateAccount{
-		Nonce:    acc.PendingNonce(),
+		// Align with iotex eth_getTransactionCount, which returns
+		// PendingNonceConsideringFreshAccount (see coreservice_with_height.go:76).
+		// This correctly handles fresh legacy accounts (returns 0 instead of 1)
+		// while still matching PendingNonce for all other cases.
+		Nonce:    acc.PendingNonceConsideringFreshAccount(),
 		Balance:  uint256.MustFromBig(balance),
 		Root:     common.BytesToHash(acc.Root[:]),
 		CodeHash: common.CopyBytes(acc.CodeHash),
 	}
 	collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
 	delete(collector.Destructs, addrHash)
+	if collector.Debug {
+		log.S().Infof("[DEBANK_DBG] PUT_ACCOUNT addr=%x bal=%s nonce=%d caller=%s",
+			cfg.Key, balance.String(), acc.PendingNonce(), debankDbgCaller(4))
+	}
+}
+
+// debankDbgCaller returns a short "file:line" trace for the N-th frame above the call site.
+// Used only when PipelineStateDiffCollector.Debug is true.
+func debankDbgCaller(skip int) string {
+	pcs := make([]uintptr, 6)
+	n := runtime.Callers(skip, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var out string
+	for i := 0; i < 4; i++ {
+		f, more := frames.Next()
+		out += fmt.Sprintf("%s:%d ", trimFuncName(f.Function), f.Line)
+		if !more {
+			break
+		}
+	}
+	return out
+}
+
+func trimFuncName(name string) string {
+	// strip package path, keep last "pkg.Func" segment
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			return name[i+1:]
+		}
+	}
+	return name
 }
 
 func (ws *workingSet) collectAccountDiffOnDelete(cfg *protocol.StateConfig) {
 	collector := ws.stateDiffCollector
 	if collector == nil || cfg.Namespace != AccountKVNamespace || len(cfg.Key) != len(hash.Hash160{}) {
+		return
+	}
+	// Only track destructs of actual accounts. Protocols (e.g. rewarding lazy
+	// migration in grantToAccount) delete their internal keys with LegacyKeyOption
+	// which defaults to AccountKVNamespace and a 20-byte hash160-of-protokey —
+	// those are not real account deletions and should not reach leafage as destructs.
+	if _, ok := cfg.Object.(*state.Account); !ok {
 		return
 	}
 	addrHash := crypto.Keccak256Hash(cfg.Key)
@@ -635,9 +743,18 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 		}
 	}
 	reg := protocol.MustGetRegistry(ctx)
+	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, p := range reg.All() {
 		if pp, ok := p.(protocol.PreStatesCreator); ok {
 			if err := pp.CreatePreStates(ctx, ws); err != nil {
+				if blkCtx.Simulate {
+					// In Simulate mode (trace_debankBlock), archive erigon state may
+					// lack protocol data (e.g. staking candidates). Skip the failing
+					// protocol's pre-states so EVM actions can still be replayed.
+					log.L().Debug("skipping CreatePreStates in simulate mode",
+						zap.String("protocol", p.Name()), zap.Error(err))
+					continue
+				}
 				return err
 			}
 		}
@@ -645,26 +762,33 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 	var (
 		receipts            = make([]*action.Receipt, 0)
 		ctxWithBlockContext = ctx
-		blkCtx              = protocol.MustGetBlockCtx(ctx)
 		fCtx                = protocol.MustGetFeatureCtx(ctx)
 	)
 	for _, act := range userActions {
-		if err := ws.txValidator.ValidateWithState(ctxWithBlockContext, act); err != nil {
-			return err
-		}
 		actionCtx, err := withActionCtx(ctxWithBlockContext, act)
 		if err != nil {
 			return err
 		}
-		for _, p := range reg.All() {
-			if validator, ok := p.(protocol.ActionValidator); ok {
-				if err := validator.Validate(actionCtx, act.Envelope, ws); err != nil {
-					return err
+		// Skip action validation in Simulate mode (e.g. trace_debankBlock replay).
+		// Archive state may not match historical data, causing validation failures.
+		if !blkCtx.Simulate {
+			if err := ws.txValidator.ValidateWithState(ctxWithBlockContext, act); err != nil {
+				return err
+			}
+			for _, p := range reg.All() {
+				if validator, ok := p.(protocol.ActionValidator); ok {
+					if err := validator.Validate(actionCtx, act.Envelope, ws); err != nil {
+						return err
+					}
 				}
 			}
 		}
 		receipt, err := ws.runAction(actionCtx, act)
 		if err != nil {
+			if blkCtx.Simulate {
+				log.L().Debug("skipping failed user action in simulate mode", zap.Error(err))
+				continue
+			}
 			return errors.Wrap(err, "error when run action")
 		}
 		receipts = append(receipts, receipt)
@@ -679,16 +803,27 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 	// Handle post system actions
 	if !protocol.MustGetFeatureCtx(ctx).PreStateSystemAction && !ignoreSystemValidation {
 		if err := ws.validatePostSystemActions(ctxWithBlockContext, systemActions); err != nil {
-			return err
+			if blkCtx.Simulate {
+				log.L().Debug("skipping system action validation in simulate mode", zap.Error(err))
+			} else {
+				return err
+			}
 		}
 	}
 	for _, act := range systemActions {
 		actionCtx, err := withActionCtx(ctxWithBlockContext, act)
 		if err != nil {
+			if blkCtx.Simulate {
+				continue
+			}
 			return err
 		}
 		receipt, err := ws.runAction(actionCtx, act)
 		if err != nil {
+			if blkCtx.Simulate {
+				log.L().Debug("skipping failed system action in simulate mode", zap.Error(err))
+				continue
+			}
 			return errors.Wrap(err, "error when run action")
 		}
 		receipts = append(receipts, receipt)
@@ -697,7 +832,14 @@ func (ws *workingSet) process(ctx context.Context, actions []*action.SealedEnvel
 		updateReceiptIndex(receipts)
 	}
 	ws.receipts = receipts
-	return ws.finalize(ctx)
+	if err := ws.finalize(ctx); err != nil {
+		if blkCtx.Simulate {
+			log.L().Debug("finalize failed in simulate mode (process)", zap.Error(err))
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.SealedEnvelope) error {
@@ -706,22 +848,33 @@ func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.Seale
 	}
 
 	reg := protocol.MustGetRegistry(ctx)
-	for _, act := range actions {
-		ctxWithActionContext, err := withActionCtx(ctx, act)
-		if err != nil {
-			return err
-		}
-		for _, p := range reg.All() {
-			if validator, ok := p.(protocol.ActionValidator); ok {
-				if err := validator.Validate(ctxWithActionContext, act.Envelope, ws); err != nil {
-					return err
+	// Skip action validation in Simulate mode (e.g. trace_debankBlock replay).
+	// Archive state may not match historical delegate data, causing PutPollResult
+	// validation failure for blocks where candidate info changed after the fact.
+	if !protocol.MustGetBlockCtx(ctx).Simulate {
+		for _, act := range actions {
+			ctxWithActionContext, err := withActionCtx(ctx, act)
+			if err != nil {
+				return err
+			}
+			for _, p := range reg.All() {
+				if validator, ok := p.(protocol.ActionValidator); ok {
+					if err := validator.Validate(ctxWithActionContext, act.Envelope, ws); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
+	blkCtx := protocol.MustGetBlockCtx(ctx)
 	for _, p := range reg.All() {
 		if pp, ok := p.(protocol.PreStatesCreator); ok {
 			if err := pp.CreatePreStates(ctx, ws); err != nil {
+				if blkCtx.Simulate {
+					log.L().Debug("skipping CreatePreStates in simulate mode",
+						zap.String("protocol", p.Name()), zap.Error(err))
+					continue
+				}
 				return err
 			}
 		}
@@ -732,7 +885,14 @@ func (ws *workingSet) processLegacy(ctx context.Context, actions []*action.Seale
 		return err
 	}
 	ws.receipts = receipts
-	return ws.finalize(ctx)
+	if err := ws.finalize(ctx); err != nil {
+		if blkCtx.Simulate {
+			log.L().Debug("finalize failed in simulate mode", zap.Error(err))
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (ws *workingSet) runActionsLegacy(
@@ -746,10 +906,21 @@ func (ws *workingSet) runActionsLegacy(
 	for _, elp := range elps {
 		ctxWithActionContext, err := withActionCtx(ctx, elp)
 		if err != nil {
+			if blkCtx.Simulate {
+				continue
+			}
 			return nil, err
 		}
 		receipt, err := ws.runAction(protocol.WithBlockCtx(ctxWithActionContext, blkCtx), elp)
 		if err != nil {
+			if blkCtx.Simulate {
+				// In Simulate mode (trace_debankBlock), some actions may fail
+				// due to missing protocol views on archive erigon state.
+				// Skip the failing action so remaining EVM actions can be traced.
+				log.L().Debug("skipping failed action in simulate mode",
+					zap.Error(err))
+				continue
+			}
 			return nil, errors.Wrap(err, "error when run action")
 		}
 		receipts = append(receipts, receipt)

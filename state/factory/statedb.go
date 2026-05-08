@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
@@ -47,6 +48,9 @@ type (
 		getHeight() (uint64, error)
 		putHeight(uint64) error
 	}
+	// StateDiffCallback is called after a block is committed with the captured state diff entries.
+	StateDiffCallback func(height uint64, entries []WriteQueueEntry, digest []byte)
+
 	// stateDB implements StateFactory interface, tracks changes to account/contract and batch-commits to DB
 	stateDB struct {
 		mutex                    sync.RWMutex
@@ -61,6 +65,7 @@ type (
 		ps                       *patchStore
 		erigonDB                 *erigonstore.ErigonDB
 		dependencies             []blockdao.BlockIndexer
+		diffCallback             StateDiffCallback
 	}
 )
 
@@ -89,6 +94,36 @@ func SkipBlockValidationStateDBOption() StateDBOption {
 		sdb.skipBlockValidationOnPut = true
 		return nil
 	}
+}
+
+// DiffCallbackStateDBOption sets a callback invoked after each block commit
+// with the block's state diff entries. Used by ioSwarm for state diff streaming.
+func DiffCallbackStateDBOption(cb StateDiffCallback) StateDBOption {
+	return func(sdb *stateDB, cfg *Config) error {
+		sdb.diffCallback = cb
+		return nil
+	}
+}
+
+// SetDiffCallback sets the state diff callback on a Factory.
+// Returns false if the factory is not a stateDB (e.g., in-memory test factory).
+func SetDiffCallback(f Factory, cb StateDiffCallback) bool {
+	if sdb, ok := f.(*stateDB); ok {
+		sdb.mutex.Lock()
+		sdb.diffCallback = cb
+		sdb.mutex.Unlock()
+		return true
+	}
+	return false
+}
+
+// ErigonDB exposes the underlying ErigonDB for canonical state-diff queries.
+// Returns nil on stateDBs that aren't backed by Erigon (e.g., legacy / in-memory factories).
+//
+// Used by api.coreService to construct canonical state_diff via Erigon's AccountChangeSet
+// / StorageChangeSet / kv.Code rather than replay-derived state.
+func (sdb *stateDB) ErigonDB() *erigonstore.ErigonDB {
+	return sdb.erigonDB
 }
 
 // DisableWorkingSetCacheOption disable workingset cache
@@ -167,6 +202,17 @@ func (sdb *stateDB) Start(ctx context.Context) error {
 		ctx = protocol.WithFeatureCtx(ctx)
 		if sdb.protocolViews, err = sdb.registry.StartAll(ctx, sdb); err != nil {
 			return err
+		}
+		// Compute GenesisStateRoot if not set (e.g. archive node restored from snapshot).
+		// This replays genesis state creation in a temporary working set to get the digest.
+		// For archive nodes, GenesisStateRoot is not set (createGenesisStates was skipped).
+		// Use genesis config hash as a deterministic non-zero proxy for state root.
+		// This ensures pipeline S3 keys are consistent and non-zero.
+		if blockchain.GenesisStateRoot == (common.Hash{}) {
+			genesisHash := sdb.cfg.Genesis.Hash()
+			blockchain.GenesisStateRoot = common.BytesToHash(genesisHash[:])
+			log.L().Info("Set GenesisStateRoot from genesis config hash (archive node)",
+				zap.String("root", blockchain.GenesisStateRoot.Hex()))
 		}
 	case db.ErrNotExist:
 		sdb.currentChainHeight = 0
@@ -267,10 +313,16 @@ func (sdb *stateDB) newReadOnlyWorkingSet(ctx context.Context, height uint64) (*
 		}
 		ws.store = newErigonWorkingSetStoreForSimulate(e)
 	}
+	// Use sdb (stateDB) for protocol view initialization, not ws.
+	// When erigon is configured, ws.store has been replaced with erigon store.
+	// Protocol views (staking candidates, etc.) need to read from stateDB's
+	// KV store which has the data; erigon's historical changesets may be
+	// incomplete and return empty results for system contract queries.
 	ws.views = protocol.NewLazyViews(func() protocol.Views {
-		views, err := sdb.registry.StartAll(ctx, ws)
+		views, err := sdb.registry.StartAll(ctx, sdb)
 		if err != nil {
-			log.L().Panic("Failed to start all protocols for lazy views", zap.Error(err))
+			log.L().Error("Failed to start all protocols for lazy views", zap.Error(err))
+			return nil
 		}
 		return views
 	})
@@ -496,14 +548,15 @@ func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) (err error) 
 		}
 	}
 	sdb.mutex.Lock()
-	defer sdb.mutex.Unlock()
 	receipts, err := ws.Receipts()
 	if err != nil {
+		sdb.mutex.Unlock()
 		return err
 	}
 	blk.Receipts = receipts
 	h, _ := ws.Height()
 	if sdb.currentChainHeight+1 != h {
+		sdb.mutex.Unlock()
 		// another working set with correct version already committed, do nothing
 		return fmt.Errorf(
 			"current state height %d + 1 doesn't match working set height %d",
@@ -511,10 +564,21 @@ func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) (err error) 
 		)
 	}
 	if err := ws.Commit(ctx, sdb.cfg.Chain.HistoryBlockRetention); err != nil {
+		sdb.mutex.Unlock()
 		return err
 	}
+	// Capture callback and entries before releasing lock
+	cb := sdb.diffCallback
+	diffEntries := ws.stateDiffEntries
+	diffDigest := ws.stateDiffDigest
 	sdb.protocolViews = ws.views
 	sdb.currentChainHeight = h
+	sdb.mutex.Unlock()
+	// Invoke state diff callback outside the mutex to avoid holding
+	// the lock during potentially slow broadcast operations
+	if cb != nil && len(diffEntries) > 0 {
+		cb(h, diffEntries, diffDigest)
+	}
 	for _, indexer := range sdb.dependencies {
 		if err := indexer.PutBlock(ctx, blk); err != nil {
 			return errors.Wrapf(err, "failed to update indexer %T", indexer)
@@ -666,6 +730,11 @@ func (sdb *stateDB) createGenesisStates(ctx context.Context) error {
 		return err
 	}
 
+	// Compute GenesisStateRoot BEFORE ws.Commit() because trieless state DB's
+	// Digest() hashes the pending write queue, which is emptied by Commit().
+	if digest, err := ws.digest(); err == nil {
+		blockchain.GenesisStateRoot = common.BytesToHash(digest[:])
+	}
 	if err := ws.Commit(ctx, 0); err != nil {
 		return err
 	}

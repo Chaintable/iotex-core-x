@@ -9,13 +9,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
 	"strconv"
 	"time"
 
+	ptypes "github.com/Chaintable/pipeline/types"
+	pipelineutil "github.com/Chaintable/pipeline/util"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers"
@@ -70,6 +74,7 @@ import (
 	"github.com/iotexproject/iotex-core/v2/server/itx/nodestats"
 	"github.com/iotexproject/iotex-core/v2/state"
 	"github.com/iotexproject/iotex-core/v2/state/factory"
+	"github.com/iotexproject/iotex-core/v2/state/factory/erigonstore"
 )
 
 const _workerNumbers int = 5
@@ -77,6 +82,33 @@ const (
 	// defaultTraceTimeout is the amount of time a single transaction can execute
 	// by default before being forcefully aborted.
 	defaultTraceTimeout = 5 * time.Second
+)
+
+type (
+	// SimulateBatchArg is one transaction in a SimulateExecutionBatch call.
+	// Skip=true marks a slot the caller already handled out-of-band (e.g. an
+	// IoTeX protocol address read routed through ABI dispatch); the batch
+	// engine leaves that index untouched and never advances ws state for it.
+	SimulateBatchArg struct {
+		Caller   address.Address
+		Envelope action.Envelope
+		Skip     bool
+	}
+	// SimulateBatchResult is the per-tx result of SimulateExecutionBatch.
+	// TraceData is the raw JSON callFrame produced by the underlying callTracer
+	// (empty for skipped slots and for txs whose tracer setup failed).
+	SimulateBatchResult struct {
+		Output    []byte
+		Receipt   *action.Receipt
+		TraceData json.RawMessage
+		Err       error
+	}
+	// SimulateBatchInfo is the block-level info echoed by SimulateExecutionBatch.
+	SimulateBatchInfo struct {
+		BlockHeight uint64
+		BlockHash   hash.Hash256
+		BlockTime   time.Time
+	}
 )
 
 type (
@@ -163,6 +195,10 @@ type (
 		ChainListener() apitypes.Listener
 		// SimulateExecution simulates execution
 		SimulateExecution(context.Context, address.Address, action.Envelope) ([]byte, *action.Receipt, error)
+		// SimulateExecutionBatch simulates a batch of executions sequentially against a single
+		// working set, allowing later transactions to observe state changes from earlier ones.
+		// archive=true to query at a specific past height.
+		SimulateExecutionBatch(ctx context.Context, height uint64, archive bool, args []SimulateBatchArg) ([]SimulateBatchResult, SimulateBatchInfo, error)
 		// SyncingProgress returns the syncing status of node
 		SyncingProgress() (uint64, uint64, uint64)
 		// TipHeight returns the tip of the chain
@@ -190,6 +226,12 @@ type (
 		Track(ctx context.Context, start time.Time, method string, size int64, success bool)
 		// BlobSidecarsByHeight returns blob sidecars by height
 		BlobSidecarsByHeight(height uint64) ([]*apitypes.BlobSidecarResult, error)
+		// DebankBlock returns trace_debankBlock output for a given block height
+		DebankBlock(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error)
+		// DebankBlockWithDebug is like DebankBlock but emits [DEBANK_DBG] log lines
+		// at PipelineStateDiffCollector PUT / CommitContracts overwrite points for
+		// investigating state_diff sender-balance drift.
+		DebankBlockWithDebug(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error)
 		// TraceBlockByNumber returns the trace result of a block by its height
 		TraceBlockByNumber(ctx context.Context, height uint64, config *tracers.TraceConfig) ([][]byte, []*action.Receipt, any, error)
 		//  TraceBlockByHash returns the trace result of a block by its hash
@@ -1794,11 +1836,11 @@ func (core *coreService) estimateExecutionGasConsumptionAt(ctx context.Context, 
 	if !enough {
 		if receipt.Status == uint64(iotextypes.ReceiptStatus_ErrExecutionReverted) {
 			if len(receipt.ExecutionRevertMsg()) > 0 {
-				return 0, retval, status.Errorf(codes.InvalidArgument, fmt.Sprintf("execution simulation is reverted due to the reason: %s", receipt.ExecutionRevertMsg()))
+				return 0, retval, status.Errorf(codes.InvalidArgument, "execution simulation is reverted due to the reason: %s", receipt.ExecutionRevertMsg())
 			}
 			return 0, retval, status.Error(codes.InvalidArgument, "execution reverted")
 		}
-		return 0, retval, status.Error(codes.Internal, fmt.Sprintf("execution simulation failed: status = %d", receipt.Status))
+		return 0, retval, status.Errorf(codes.Internal, "execution simulation failed: status = %d", receipt.Status)
 	}
 	estimatedGas := receipt.GasConsumed
 	elp.SetGas(estimatedGas)
@@ -2060,6 +2102,8 @@ func (core *coreService) TraceTransaction(ctx context.Context, actHash string, c
 		BlockTimeStamp: blk.Timestamp(),
 		GasLimit:       g.BlockGasLimitByHeight(blk.Height()),
 		Producer:       blk.PublicKey().Address(),
+		BaseFee:        blk.BaseFee(),
+		ExcessBlobGas:  blk.ExcessBlobGas(),
 		Simulate:       true,
 	})
 	ctx = protocol.WithRegistry(ctx, core.registry)
@@ -2245,6 +2289,129 @@ func (core *coreService) simulateExecution(
 	return evm.SimulateExecution(ctx, ws, addr, elp, opts...)
 }
 
+// SimulateExecutionBatch simulates txs serially against a single working set.
+// It mirrors evm.SimulateExecution's context setup but uses ReadOnly=false on
+// each per-action context so EVM advances nonces and persists state diffs in
+// the ws across the batch.
+func (core *coreService) SimulateExecutionBatch(
+	ctx context.Context,
+	height uint64,
+	archive bool,
+	args []SimulateBatchArg,
+) ([]SimulateBatchResult, SimulateBatchInfo, error) {
+	var (
+		err error
+		ws  protocol.StateManagerWithCloser
+	)
+	if archive {
+		ctx, err = core.bc.ContextAtHeight(ctx, height)
+	} else {
+		ctx, err = core.bc.Context(ctx)
+	}
+	if err != nil {
+		return nil, SimulateBatchInfo{}, status.Error(codes.Internal, err.Error())
+	}
+	bcCtx := protocol.MustGetBlockchainCtx(ctx)
+	ctx = protocol.WithFeatureCtx(protocol.WithBlockCtx(ctx, protocol.BlockCtx{
+		BlockHeight:    bcCtx.Tip.Height,
+		BlockTimeStamp: bcCtx.Tip.Timestamp,
+	}))
+	if archive {
+		ws, err = core.sf.WorkingSetAtHeight(ctx, height)
+	} else {
+		ws, err = core.sf.WorkingSet(ctx)
+	}
+	if err != nil {
+		return nil, SimulateBatchInfo{}, status.Error(codes.Internal, err.Error())
+	}
+	defer ws.Close()
+
+	ctx = evm.WithHelperCtx(ctx, evm.HelperContext{
+		GetBlockHash:   bcCtx.GetBlockHash,
+		GetBlockTime:   bcCtx.GetBlockTime,
+		DepositGasFunc: rewarding.DepositGas,
+	})
+	g := core.bc.Genesis()
+	zeroAddr, err := address.FromString(address.ZeroAddress)
+	if err != nil {
+		return nil, SimulateBatchInfo{}, err
+	}
+	simCtx := protocol.WithFeatureCtx(protocol.WithBlockCtx(ctx, protocol.BlockCtx{
+		BlockHeight:    bcCtx.Tip.Height + 1,
+		BlockTimeStamp: bcCtx.Tip.Timestamp.Add(g.BlockInterval),
+		GasLimit:       g.BlockGasLimitByHeight(bcCtx.Tip.Height + 1),
+		Producer:       zeroAddr,
+		BaseFee:        protocol.CalcBaseFee(g.Blockchain, &bcCtx.Tip),
+		ExcessBlobGas:  protocol.CalcExcessBlobGas(bcCtx.Tip.ExcessBlobGas, bcCtx.Tip.BlobGasUsed),
+	}))
+
+	results := make([]SimulateBatchResult, len(args))
+	callTracerName := "callTracer"
+	for i := range args {
+		if args[i].Skip {
+			// Caller pre-handled this slot (e.g. protocol-addr ABI dispatch);
+			// leave ws state untouched so subsequent EVM txs see the same state
+			// they would without this slot.
+			continue
+		}
+		accState, accErr := accountutil.AccountState(simCtx, ws, args[i].Caller)
+		if accErr != nil {
+			results[i] = SimulateBatchResult{Err: accErr}
+			continue
+		}
+		var pendingNonce uint64
+		if protocol.MustGetFeatureCtx(simCtx).UseZeroNonceForFreshAccount {
+			pendingNonce = accState.PendingNonceConsideringFreshAccount()
+		} else {
+			pendingNonce = accState.PendingNonce()
+		}
+		args[i].Envelope.SetNonce(pendingNonce)
+
+		// Per-tx callTracer captures the EVM call frame tree for the wire
+		// `traces[]` field. Tracer setup failures degrade gracefully: the tx
+		// still runs without trace collection rather than failing the batch.
+		callTracer := newEVMTracer(new(tracers.Context), &tracers.TraceConfig{
+			Tracer: &callTracerName,
+		})
+		txCtx := simCtx
+		tracerOK := callTracer.Reset() == nil
+		if tracerOK {
+			txCtx = protocol.WithVMConfigCtx(simCtx, vm.Config{
+				Tracer:    callTracer,
+				NoBaseFee: true,
+			})
+		}
+		actionHash := hash.Hash256b(byteutil.Must(proto.Marshal(args[i].Envelope.Proto())))
+		txCtx = protocol.WithActionCtx(txCtx, protocol.ActionCtx{
+			Caller:     args[i].Caller,
+			ActionHash: actionHash,
+			ReadOnly:   false,
+		})
+		retval, receipt, execErr := evm.ExecuteContract(txCtx, ws, args[i].Envelope)
+
+		var traceData json.RawMessage
+		if tracerOK {
+			if rawTracer, ok := callTracer.Unwrap().(tracers.Tracer); ok {
+				if td, terr := rawTracer.GetResult(); terr == nil {
+					traceData = td
+				}
+			}
+		}
+		results[i] = SimulateBatchResult{
+			Output:    retval,
+			Receipt:   receipt,
+			TraceData: traceData,
+			Err:       execErr,
+		}
+	}
+
+	return results, SimulateBatchInfo{
+		BlockHeight: bcCtx.Tip.Height,
+		BlockHash:   bcCtx.Tip.Hash,
+		BlockTime:   bcCtx.Tip.Timestamp,
+	}, nil
+}
+
 func (core *coreService) workingSetAt(ctx context.Context, height uint64) (context.Context, protocol.StateManagerWithCloser, error) {
 	if height == 0 {
 		height = core.bc.TipHeight()
@@ -2277,6 +2444,8 @@ func (core *coreService) traceBlock(ctx context.Context, blk *block.Block, confi
 		BlockTimeStamp: blk.Timestamp(),
 		GasLimit:       g.BlockGasLimitByHeight(blk.Height()),
 		Producer:       blk.PublicKey().Address(),
+		BaseFee:        blk.BaseFee(),
+		ExcessBlobGas:  blk.ExcessBlobGas(),
 		Simulate:       true,
 	})
 	ctx = protocol.WithRegistry(ctx, core.registry)
@@ -2336,3 +2505,287 @@ func filterReceipts(receipts []*action.Receipt, actHash hash.Hash256) *action.Re
 	}
 	return nil
 }
+
+// DebankBlock replays a block and returns trace_debankBlock output.
+func (core *coreService) DebankBlock(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error) {
+	return core.debankBlockImpl(ctx, height, false)
+}
+
+// DebankBlockWithDebug is like DebankBlock but emits [DEBANK_DBG] log lines
+// at every sm.PutState(Account) and at the CommitContracts EOA-overwrite path.
+// Use for investigating state_diff sender-balance drift.
+func (core *coreService) DebankBlockWithDebug(ctx context.Context, height uint64) (*ptypes.DebankOutPut, error) {
+	return core.debankBlockImpl(ctx, height, true)
+}
+
+func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, debug bool) (*ptypes.DebankOutPut, error) {
+	g := core.bc.Genesis()
+
+	// genesis block: special case
+	if height == 0 {
+		return buildGenesisDebankOutput(g)
+	}
+
+	blk, err := core.dao.GetBlockByHeight(height)
+	if err != nil {
+		return nil, err
+	}
+
+	// set up block context
+	ctx, err = core.bc.ContextAtHeight(ctx, blk.Height())
+	if err != nil {
+		return nil, err
+	}
+	ctx = protocol.WithBlockCtx(ctx, protocol.BlockCtx{
+		BlockHeight:    blk.Height(),
+		BlockTimeStamp: blk.Timestamp(),
+		GasLimit:       g.BlockGasLimitByHeight(blk.Height()),
+		Producer:       blk.PublicKey().Address(),
+		BaseFee:        blk.BaseFee(),
+		ExcessBlobGas:  blk.ExcessBlobGas(),
+		Simulate:       true,
+	})
+	ctx = protocol.WithRegistry(ctx, core.registry)
+	ctx = protocol.WithFeatureCtx(ctx)
+	bcCtx := protocol.MustGetBlockchainCtx(ctx)
+	ctx = evm.WithHelperCtx(ctx, evm.HelperContext{
+		GetBlockHash:   bcCtx.GetBlockHash,
+		GetBlockTime:   bcCtx.GetBlockTime,
+		DepositGasFunc: rewarding.DepositGas,
+	})
+
+	// create RPC tracer
+	rpcTracer := newIotexRPCTracer(core.bc.ChainID())
+	gethBlock := buildSyntheticGethBlock(blk, g)
+	rpcTracer.OnBlockStart(gethBlock)
+	rpcTracer.SetActions(blk.Actions)
+
+	// per-action EVM state diffs (storages + codes)
+	var evmDiffs []perActionStateDiff
+
+	// replayStatuses[i] = receipt.Status produced by replay for tx i. Populated by the
+	// CaptureTx callback below; compared against canonical historical receipts after
+	// replay to detect divergent blocks (Phase 5 metric).
+	replayStatuses := make([]uint64, len(blk.Actions))
+	for i := range replayStatuses {
+		replayStatuses[i] = ^uint64(0) // sentinel: "not captured" (no replay produced)
+	}
+
+	// set up tracer context
+	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer})
+	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
+		CaptureTx: func(retval []byte, receipt *action.Receipt) {
+			idx := rpcTracer.currentIdx
+			if idx > 0 {
+				idx-- // currentIdx was already incremented by CaptureTxEnd
+			}
+			if idx < len(blk.Actions) {
+				selp := blk.Actions[idx]
+				// Capture replay status for divergence detection BEFORE the early return below.
+				// Non-EVM actions (GrantReward / PutPollResult / ...) still produce a receipt
+				// but we don't run them through OnTxEnd; the status is still meaningful.
+				if idx >= 0 && idx < len(replayStatuses) {
+					replayStatuses[idx] = receipt.Status
+				}
+				// non-eth action (GrantReward / PutPollResult / ...) has no paired
+				// inner.OnTxStart (rpc_tracer.CaptureTxStart returns early when
+				// selp.ToEthTx fails). Skip OnTxEnd so the pipeline tracer sees
+				// balanced OnTxStart/OnTxEnd pairs.
+				if _, err := selp.ToEthTx(); err != nil {
+					return
+				}
+				// set TxIndex before converting — updateReceiptIndex hasn't run yet
+				receipt.TxIndex = uint32(idx)
+				gethReceipt := convertActionReceiptToGethReceipt(receipt, selp)
+				if gethReceipt != nil {
+					gethReceipt.TransactionIndex = uint(idx)
+					rpcTracer.OnTxEnd(gethReceipt, nil)
+				}
+			}
+		},
+		// EmitTransferLogs fires BEFORE CaptureTxEnd so the logs get into callstack[top].Logs
+		// and are picked up by callTracer.addTraceAndLog when OnTxEnd runs.
+		EmitTransferLogs: func(receipt *action.Receipt, includeEVMLogs bool) {
+			emitTransferLogsAsEvents(rpcTracer, receipt, includeEVMLogs)
+		},
+		CaptureStateDiff: func(destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte) {
+			evmDiffs = append(evmDiffs, perActionStateDiff{
+				destructs: destructs,
+				accounts:  accounts,
+				storages:  storages,
+				codes:     codes,
+			})
+		},
+		OnLog:              rpcTracer.OnLog,
+		DiscardPendingLogs: rpcTracer.DiscardPendingLogs,
+	})
+
+	// set up workingset-level state diff collector for non-EVM action balance changes
+	collector := protocol.NewPipelineStateDiffCollector()
+	collector.Debug = debug
+	ctx = protocol.WithStateDiffCollectorCtx(ctx, collector)
+	if debug {
+		log.L().Info("[DEBANK_DBG] trace_debankBlock debug mode enabled", zap.Uint64("height", height))
+	}
+
+	// Replay all actions (best-effort: produces traces / error events / error traces).
+	// State_diff and events come from canonical Erigon reads below — collector and
+	// evmDiffs are intentionally observed only for debug here.
+	replayStart := time.Now()
+	ws, err := core.sf.WorkingSetAtTransaction(ctx, blk.Height(), blk.Actions...)
+	canonicalReplayDuration.Observe(time.Since(replayStart).Seconds())
+	if err != nil {
+		replayFailedBlocksTotal.Inc()
+		return nil, errors.Wrapf(err, "WorkingSetAtTransaction failed at height %d", blk.Height())
+	}
+	if ws != nil {
+		defer ws.Close()
+	}
+	_ = collector
+	_ = evmDiffs
+
+	// Compute state roots from block headers.
+	stateDigest := blk.DeltaStateDigest()
+	root := common.BytesToHash(stateDigest[:])
+	originRoot := common.Hash{}
+	if blk.Height() == 1 {
+		// block 0 has no DAO entry on archive restore; its synthetic StateRoot
+		// comes from buildGenesisDebankOutput which uses blockchain.GenesisStateRoot
+		// (config hash fallback when createGenesisStates is skipped). Mirror that
+		// here so block_1.originRoot == block_0.root and the chain is continuous.
+		originRoot = blockchain.GenesisStateRoot
+	} else if parentBlk, err := core.dao.GetBlockByHeight(blk.Height() - 1); err == nil {
+		parentDigest := parentBlk.DeltaStateDigest()
+		originRoot = common.BytesToHash(parentDigest[:])
+	}
+
+	// Pull replay-derived BlockFile / Header / ValidationHash. We pass nil maps so
+	// the inner state_diff comes out empty — we'll overwrite it with canonical RLP.
+	out := rpcTracer.GetOutPut(originRoot, root, nil, nil, nil, nil)
+
+	// Locate ErigonDB on the factory; canonical path is unavailable without it.
+	erigonDB := lookupErigonDB(core.sf)
+	if erigonDB == nil {
+		return nil, errors.New("canonical state_diff requires ErigonDB-backed factory (archive node)")
+	}
+
+	// Build canonical state_diff (5 buckets + Hash + ParentHash) and the storage_contracts
+	// list directly from kv.AccountChangeSet / kv.StorageChangeSet / kv.PlainState / kv.Code.
+	canonicalStart := time.Now()
+	canonicalDiff, storageContracts, err := buildCanonicalStateDiff(ctx, core.dao, erigonDB, height, core.bc.TipHeight())
+	canonicalStateDiffDuration.Observe(time.Since(canonicalStart).Seconds())
+	if err != nil {
+		if errors.Is(err, ErrHistoryUnavailable) {
+			canonicalHistoryUnavailableTotal.Inc()
+		}
+		if errors.Is(err, ErrCanonicalCodeMissing) {
+			canonicalCodeMissingTotal.Inc()
+		}
+		return nil, err
+	}
+
+	// Inject rewarding-pool / staking-pool synthetic accounts. These addresses
+	// (RewardingProtocolAddrHash / StakingProtocolAddrHash) live in custom protocol
+	// namespaces that bypass kv.PlainState, so the canonical reader cannot see them.
+	// To preserve parity with native iotex `eth_getBalance(<pool>, h)` (which special-
+	// cases these addresses and returns the LATEST tip value regardless of h), we
+	// synthesize tip-snapshot entries here. Same lossy projection as legacy path.
+	appendProtocolPoolSyntheticAccounts(ctx, core.bc, core.registry, core.sf, canonicalDiff)
+
+	// Fetch canonical (historical) receipts. Used for both events synthesis and
+	// tx-level field override below.
+	receipts, err := core.dao.GetReceipts(height)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetReceipts for canonical events")
+	}
+	txIDs := make([]string, len(blk.Actions))
+	for i, selp := range blk.Actions {
+		if h, hashErr := selp.Hash(); hashErr == nil {
+			txIDs[i] = "0x" + hex.EncodeToString(h[:])
+		}
+	}
+	canonicalEvents := buildCanonicalEvents(receipts, txIDs)
+
+	// Replay-vs-canonical status comparison: produces per-tx metric and log noise.
+	// Status divergence is information; the actual override + trace-strip happens
+	// inside overrideTxsAndStripDivergedTraces below.
+	for i, hr := range receipts {
+		if i >= len(replayStatuses) || hr == nil {
+			continue
+		}
+		rs := replayStatuses[i]
+		if rs == ^uint64(0) {
+			// Replay never observed this tx (e.g., simulate-mode skip). Don't compare.
+			continue
+		}
+		if rs != hr.Status {
+			replayDivergedTxsTotal.Inc()
+			log.L().Warn("trace_debankBlock replay receipt status diverged from canonical",
+				zap.Uint64("height", height),
+				zap.Int("tx_idx", i),
+				zap.String("tx_hash", txIDs[i]),
+				zap.Uint64("replay_status", rs),
+				zap.Uint64("canonical_status", hr.Status),
+			)
+		}
+	}
+
+	// Override replay-derived fields with canonical ones.
+	out.BlockFile.Events = canonicalEvents
+	out.BlockFile.StorageContracts = storageContracts
+
+	// Build receipt-by-tx-ID lookup. Indexing receipts and BlockFile.Txs by parallel
+	// position is unsafe — receipts is action-ordered (covers ALL actions incl. native
+	// GrantReward / staking) while BlockFile.Txs only holds eth-compatible actions
+	// packed sequentially. Match by action_hash via tx.ID = "0x"+actionHashHex.
+	receiptByTxID := make(map[string]*action.Receipt, len(receipts))
+	for _, r := range receipts {
+		if r == nil {
+			continue
+		}
+		key := "0x" + hex.EncodeToString(r.ActionHash[:])
+		receiptByTxID[key] = r
+	}
+
+	// Override tx.Status / tx.GasUsed from canonical receipts on EVERY eth-compatible tx
+	// (replay's gas can drift slightly even when status agrees). For txs whose replay
+	// status DIVERGES from canonical (~0.7% pre-Sumatra), also strip their replay-derived
+	// traces / error_traces / error_events — replay's call tree is not the on-chain truth
+	// there — and append a synthesized canonical-minimal trace. Main events come from
+	// receipts so they stay correct in either direction.
+	divergedTxs := overrideTxsAndStripDivergedTraces(out, receiptByTxID)
+	if divergedTxs > 0 {
+		replayDivergedBlocksTotal.Inc()
+	}
+
+	// Re-encode StateDiff RLP from canonical diff.
+	sdBytes, err := pipelineutil.EncodeToRlp(canonicalDiff)
+	if err != nil {
+		return nil, errors.Wrap(err, "encode canonical state_diff")
+	}
+	out.StateDiff = hexutil.Bytes(sdBytes)
+
+	// Recompute ValidationHash to reflect overridden BlockFile.
+	out.ValidationHash = out.BlockFile.Validation().ValidationHash
+
+	return out, nil
+}
+
+// lookupErigonDB extracts the ErigonDB handle from a factory.Factory if it implements
+// the ErigonDB() accessor. Returns nil for legacy / in-memory factories.
+type erigonDBProvider interface {
+	ErigonDB() *erigonstore.ErigonDB
+}
+
+func lookupErigonDB(sf factory.Factory) *erigonstore.ErigonDB {
+	if p, ok := sf.(erigonDBProvider); ok {
+		return p.ErigonDB()
+	}
+	return nil
+}
+
+// Pool synthetic accounts (addProtocolPoolSyntheticAccounts / addSyntheticAccount /
+// readStakingTotalAmount) were removed when state_diff moved to the canonical Erigon
+// path. Pool balances are stored in custom namespaces (RewardingNamespace /
+// StakingNamespace), bypass kv.PlainState, and intentionally do NOT appear in the
+// canonical state_diff. See: trace_debankBlock-canonical-design.md §4.7.

@@ -261,6 +261,12 @@ func NewBlockchain(cfg Config, g genesis.Genesis, dao blockdao.BlockDAO, bbf Blo
 		if err != nil {
 			log.L().Panic("failed to create chain config for pipeline tracer.", zap.Error(err))
 		}
+		// NewChainConfig only sets ChainID after Iceland fork (height 12289321),
+		// but OnBlockchainInit is called with height=0, leaving ChainID nil.
+		// Pipeline tracer uses ChainID.String() for S3 key paths — nil produces "<nil>".
+		if chainConfig.ChainID == nil {
+			chainConfig.ChainID = new(big.Int).SetUint64(uint64(cfg.EVMNetworkID))
+		}
 		chain.logger.OnBlockchainInit(chainConfig)
 	}
 
@@ -634,7 +640,9 @@ func (bc *blockchain) commitBlock(blk *block.Block) error {
 }
 
 // getCommonAncestor finds the common ancestor between two block contexts and returns
-// the ancestor, the chain from ancestor to blocka (dropBlocks), and the chain from ancestor to blockb (newBlocks)
+// the ancestor, the chain from ancestor to blocka (dropBlocks), and the chain from ancestor to blockb (newBlocks).
+// Both the fast path and slow path (reorg walk-back) use IoTeX native hashes consistently:
+// dao.GetBlockHash() returns native hashes, and pushBlockChange now uses native hashes too.
 func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptypes.BlockContext) (ptypes.BlockContext, []ptypes.BlockContext, []ptypes.BlockContext) {
 	var chainA, chainB []ptypes.BlockContext
 	if blockb.ParentHash == blocka.Hash {
@@ -646,7 +654,13 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 		if err != nil {
 			log.L().Fatal("Failed to get header by hash", zap.String("hash", blockb.ParentHash.Hex()), zap.Error(err))
 		}
-		blkHash := headerb.HashBlock()
+		// Use dao.GetBlockHash instead of header.HashBlock() to stay consistent
+		// with IoTeX's hash system where GetBlockHash(0) = GenesisHash() (config hash),
+		// which differs from GenesisBlock().HashBlock() (header protobuf hash).
+		blkHash, err := bc.dao.GetBlockHash(headerb.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headerb.Height()), zap.Error(err))
+		}
 		prevHash := headerb.PrevHash()
 		blockb = ptypes.BlockContext{
 			BlockNumber: headerb.Height(),
@@ -661,11 +675,14 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 		if err != nil {
 			log.L().Fatal("Failed to get header by hash", zap.String("hash", blocka.ParentHash.Hex()), zap.Error(err))
 		}
-		blkHash := headera.HashBlock()
+		blkHashA, err := bc.dao.GetBlockHash(headera.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headera.Height()), zap.Error(err))
+		}
 		prevHash := headera.PrevHash()
 		blocka = ptypes.BlockContext{
 			BlockNumber: headera.Height(),
-			Hash:        common.Hash(blkHash),
+			Hash:        common.Hash(blkHashA),
 			ParentHash:  common.Hash(prevHash),
 			Timestamp:   uint64(headera.Timestamp().Unix()),
 		}
@@ -675,11 +692,14 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 		if err != nil {
 			log.L().Fatal("Failed to get header by hash", zap.String("hash", blockb.ParentHash.Hex()), zap.Error(err))
 		}
-		blkHash = headerb.HashBlock()
+		blkHashB, err := bc.dao.GetBlockHash(headerb.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headerb.Height()), zap.Error(err))
+		}
 		prevHash = headerb.PrevHash()
 		blockb = ptypes.BlockContext{
 			BlockNumber: headerb.Height(),
-			Hash:        common.Hash(blkHash),
+			Hash:        common.Hash(blkHashB),
 			ParentHash:  common.Hash(prevHash),
 			Timestamp:   uint64(headerb.Timestamp().Unix()),
 		}
@@ -689,7 +709,9 @@ func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptype
 	return blocka, chainA, chainB
 }
 
-// pushBlockChange pushes block change notification to kafka
+// pushBlockChange pushes block change notification to kafka.
+// Uses IoTeX native hashes (via MixDigest embedded by ConvertToGethBlock) for block
+// identity, matching the official Babel API and writer ETH RPC.
 func (bc *blockchain) pushBlockChange(blk *block.Block) {
 	if tracer.NodeXPusher == nil {
 		return
@@ -698,24 +720,38 @@ func (bc *blockchain) pushBlockChange(blk *block.Block) {
 	if lastPushed == nil || lastPushed.BlockNumber > blk.Height() {
 		return
 	}
-	blkHash := blk.HashBlock()
-	prevHash := blk.PrevHash()
-	_, dropBlocks, newBlocks := bc.getCommonAncestor(*lastPushed, ptypes.BlockContext{
+	lastCtx := *lastPushed
+	// Native hash extracted from MixDigest by the pipeline tracer in OnBlockStart
+	blkHash := tracer.BlockCtx.BlockHash
+
+	// ParentHash: for sequential blocks use lastCtx.Hash (from Kafka), otherwise
+	// fall back to blk.PrevHash(). Both are now IoTeX native hashes, so they're consistent.
+	var parentHash common.Hash
+	if blk.Height() == lastCtx.BlockNumber+1 {
+		parentHash = lastCtx.Hash
+	} else {
+		log.L().Warn("pushBlockChange: non-sequential block, falling back to native PrevHash",
+			zap.Uint64("blkHeight", blk.Height()),
+			zap.Uint64("lastPushedHeight", lastCtx.BlockNumber))
+		parentHash = common.Hash(blk.PrevHash())
+	}
+
+	_, dropBlocks, newBlocks := bc.getCommonAncestor(lastCtx, ptypes.BlockContext{
 		BlockNumber: blk.Height(),
-		Hash:        common.Hash(blkHash),
-		ParentHash:  common.Hash(prevHash),
+		Hash:        blkHash,
+		ParentHash:  parentHash,
 		Timestamp:   uint64(blk.Timestamp().Unix()),
 	})
 	var blockChange *ptypes.BlockChangeNotification
 	if len(dropBlocks) > 0 {
-		log.L().Info("pushBlockChange drop blocks", zap.String("hash", common.Hash(blkHash).Hex()))
+		log.L().Info("pushBlockChange drop blocks", zap.String("hash", blkHash.Hex()))
 		blockChange = &ptypes.BlockChangeNotification{
 			ChangeType: 2,
 			NewBlocks:  newBlocks,
 			DropBlocks: dropBlocks,
 		}
 	} else if len(newBlocks) > 0 {
-		log.L().Info("pushBlockChange new blocks", zap.String("hash", common.Hash(blkHash).Hex()))
+		log.L().Info("pushBlockChange new blocks", zap.String("hash", blkHash.Hex()))
 		blockChange = &ptypes.BlockChangeNotification{
 			ChangeType: 1,
 			NewBlocks:  newBlocks,

@@ -3,12 +3,12 @@ name: "Build new artifacts"
 on:
   pull_request:
     branches:
-      - "pipeline"
+      - "debank"
   workflow_dispatch:
 
 env:
   REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
-  IMAGE: blockchain/shib-bor-x
+  IMAGE: blockchain/iotex-x
   DOCKERFILE: Dockerfile.debank
   AWS_REGION: ap-northeast-1
 

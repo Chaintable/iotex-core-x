@@ -271,10 +271,13 @@ func ExecuteContract(
 			}
 		}
 	}
+	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM START height=%d ts=%s baseFee=%v gasLimit=%d simulate=%v readOnly=%v",
+		ps.blkCtx.BlockHeight, ps.blkCtx.BlockTimeStamp, ps.blkCtx.BaseFee, ps.blkCtx.GasLimit, ps.blkCtx.Simulate, ps.actionCtx.ReadOnly)
 	retval, depositGas, remainingGas, contractAddress, statusCode, err := executeInEVM(ctx, ps, stateDB)
 	if err != nil {
 		return nil, nil, err
 	}
+	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM done status=%d remainingGas=%d contract=%v", statusCode, remainingGas, contractAddress)
 	receipt := &action.Receipt{
 		GasConsumed:       ps.gas - remainingGas,
 		BlockHeight:       ps.blkCtx.BlockHeight,
@@ -311,12 +314,37 @@ func ExecuteContract(
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to split gas")
 		}
+		if c := protocol.GetStateDiffCollectorCtx(ctx); c != nil && c.Debug {
+			var b, p string
+			if baseFee != nil {
+				b = baseFee.String()
+			}
+			if priorityFee != nil {
+				p = priorityFee.String()
+			}
+			log.T(ctx).Sugar().Infof("[DEBANK_DBG] SPLIT_GAS consumedGas=%d baseFeeAmt=%s priorityFeeAmt=%s", consumedGas, b, p)
+		}
 		depositLog, err = ps.helperCtx.DepositGasFunc(ctx, sm, baseFee, protocol.PriorityFeeOption(priorityFee))
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 
+	// capture per-action EVM state diff before CommitContracts/clear wipes tracking data.
+	// Unwrap through ErigonStateDBAdapter/Dryrun wrappers to reach the inner StateDBAdapter.
+	var adapter *StateDBAdapter
+	switch s := stateDB.(type) {
+	case *StateDBAdapter:
+		adapter = s
+	case *ErigonStateDBAdapter:
+		adapter = s.StateDBAdapter
+	case *ErigonStateDBAdapterDryrun:
+		adapter = s.ErigonStateDBAdapter.StateDBAdapter
+	}
+	if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil && adapter != nil {
+		destructs, accts, stors, cds := adapter.StateDiff()
+		t.CaptureStateDiff(destructs, accts, stors, cds)
+	}
 	if err := stateDB.CommitContracts(); err != nil {
 		return nil, nil, errors.Wrap(err, "failed to commit contracts to underlying db")
 	}
@@ -583,6 +611,7 @@ func executeInEVM(ctx context.Context, evmParams *Params, stateDB stateDB) ([]by
 		ret, remainingGas, evmErr = evm.Call(executor, *evmParams.contract, evmParams.data, remainingGas, amount)
 	}
 	if evmErr != nil {
+		log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM evmErr=%v retLen=%d retHex=%x", evmErr, len(ret), ret)
 		log.T(ctx).Debug("evm error", zap.Error(evmErr))
 		// The only possible consensus-error would be if there wasn't
 		// sufficient balance to make the transfer happen.
@@ -762,6 +791,56 @@ func SimulateExecution(
 		tCtx.CaptureTx(retval, receipt)
 	}
 	return retval, receipt, err
+}
+
+// SimulateAndCollectAccessList runs a read-only EVM simulation and returns all
+// storage slots accessed during execution. This is used by the ioswarm coordinator
+// to discover which storage slots need to be prefetched for L3/L4 agents.
+func SimulateAndCollectAccessList(
+	ctx context.Context,
+	sm protocol.StateManager,
+	caller address.Address,
+	ex action.TxDataForSimulation,
+) (map[common.Address][]common.Hash, error) {
+	if err := ex.SanityCheck(); err != nil {
+		return nil, err
+	}
+	g := genesis.MustExtractGenesisContext(ctx)
+	bcCtx := protocol.MustGetBlockchainCtx(ctx)
+	ctx = protocol.WithActionCtx(
+		ctx,
+		protocol.ActionCtx{
+			Caller:     caller,
+			ActionHash: hash.Hash256b(byteutil.Must(proto.Marshal(ex.Proto()))),
+			ReadOnly:   true,
+		},
+	)
+	zeroAddr, err := address.FromString(address.ZeroAddress)
+	if err != nil {
+		return nil, err
+	}
+	ctx = protocol.WithFeatureCtx(protocol.WithBlockCtx(
+		ctx,
+		protocol.BlockCtx{
+			BlockHeight:    bcCtx.Tip.Height + 1,
+			BlockTimeStamp: bcCtx.Tip.Timestamp.Add(g.BlockInterval),
+			GasLimit:       g.BlockGasLimitByHeight(bcCtx.Tip.Height + 1),
+			Producer:       zeroAddr,
+			BaseFee:        protocol.CalcBaseFee(g.Blockchain, &bcCtx.Tip),
+			ExcessBlobGas:  protocol.CalcExcessBlobGas(bcCtx.Tip.ExcessBlobGas, bcCtx.Tip.BlobGasUsed),
+		},
+	))
+	stateDB, err := prepareStateDB(ctx, sm)
+	if err != nil {
+		return nil, err
+	}
+	ps, err := newParams(ctx, ex)
+	if err != nil {
+		return nil, err
+	}
+	// Run EVM — we ignore the return value/receipt, we only care about accessed slots
+	executeInEVM(ctx, ps, stateDB)
+	return stateDB.AccessedSlots(), nil
 }
 
 // ExtractRevertMessage extracts the revert message from the return value

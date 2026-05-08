@@ -420,6 +420,14 @@ func (svr *web3Handler) blockNumberOrHashToHeight(bn rpc.BlockNumberOrHash) (uin
 		return uint64(blk.Block.Height()), true, nil
 	}
 
+	// Defense in depth: an empty BlockNumberOrHash (both fields nil) used to
+	// reach here and panic on `*bn.BlockNumber`. Treat it as latest so any
+	// future caller constructing the struct incorrectly degrades to the
+	// usual archive-vs-tip code path instead of crashing the request.
+	if bn.BlockNumber == nil {
+		return 0, false, nil
+	}
+
 	switch *bn.BlockNumber {
 	case rpc.SafeBlockNumber, rpc.FinalizedBlockNumber, rpc.LatestBlockNumber, rpc.PendingBlockNumber:
 		return 0, false, nil

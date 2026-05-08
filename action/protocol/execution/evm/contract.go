@@ -115,6 +115,7 @@ func (c *contract) GetCode() ([]byte, error) {
 
 // SetCode sets the contract's byte-code
 func (c *contract) SetCode(hash hash.Hash256, code []byte) {
+	log.L().Sugar().Infof("[DEBANK_DBG_CREATE] contract.SetCode codeLen=%d hash=%x", len(code), hash[:8])
 	c.Account.CodeHash = hash[:]
 	c.code = code
 	c.dirtyCode = true

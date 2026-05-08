@@ -17,9 +17,26 @@ import (
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
 )
 
-// ConvertToGethBlock converts an iotex block.Block to a geth types.Block
+// GenesisStateRoot is set during createGenesisStates() to the genesis DeltaStateDigest.
+// BuildGenesisGethBlock uses it so the genesis geth block's Root field matches
+// block 1's originRoot, preventing leafage from fetching a non-existent state diff.
+var GenesisStateRoot common.Hash
+
+// ConvertToGethBlock converts an iotex block.Block to a geth types.Block.
+// The geth block serves as a data carrier for the pipeline tracer. We embed the
+// IoTeX native hash in header.MixDigest so the tracer can extract it without
+// cross-package imports. ParentHash is set to the IoTeX native parent hash
+// (GenesisHash for block 1, blk.PrevHash() for others).
 func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
-	prevHash := blk.PrevHash()
+	nativeHash := blk.HashBlock()
+	var parentHash common.Hash
+	if blk.Height() == 1 {
+		genesisHash := block.GenesisHash()
+		parentHash = common.BytesToHash(genesisHash[:])
+	} else {
+		prevHash := blk.PrevHash()
+		parentHash = common.BytesToHash(prevHash[:])
+	}
 	stateDigest := blk.DeltaStateDigest()
 	txRoot := blk.TxRoot()
 	receiptRoot := blk.ReceiptRoot()
@@ -28,7 +45,8 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		Time:        uint64(blk.Timestamp().Unix()),
 		GasUsed:     blk.GasUsed(),
 		GasLimit:    g.BlockGasLimitByHeight(blk.Height()),
-		ParentHash:  common.BytesToHash(prevHash[:]),
+		ParentHash:  parentHash,
+		MixDigest:   common.BytesToHash(nativeHash[:]),
 		Root:        common.BytesToHash(stateDigest[:]),
 		TxHash:      common.BytesToHash(txRoot[:]),
 		ReceiptHash: common.BytesToHash(receiptRoot[:]),
@@ -99,13 +117,17 @@ func ConvertToGethReceipt(receipt *action.Receipt) *types.Receipt {
 	return r
 }
 
-// BuildGenesisGethBlock creates a geth types.Block for the genesis block (height=0)
+// BuildGenesisGethBlock creates a geth types.Block for the genesis block (height=0).
+// MixDigest is set to GenesisHash() (config hash) — the IoTeX native "block hash" for genesis.
 func BuildGenesisGethBlock(g genesis.Genesis) *types.Block {
+	genesisHash := block.GenesisHash()
 	header := &types.Header{
 		Number:     common.Big0,
 		Time:       uint64(g.Timestamp),
 		GasLimit:   g.BlockGasLimitByHeight(0),
 		Difficulty: common.Big0,
+		Root:       GenesisStateRoot,
+		MixDigest:  common.BytesToHash(genesisHash[:]),
 	}
 	return types.NewBlockWithHeader(header)
 }
