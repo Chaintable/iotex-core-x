@@ -2704,7 +2704,14 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 			txIDs[i] = "0x" + hex.EncodeToString(h[:])
 		}
 	}
-	canonicalEvents := buildCanonicalEvents(receipts, txIDs)
+	// Build trace-binding maps from replay output before we overwrite events:
+	// 1) action.Log.Index -> precise frame binding (from callTracer's
+	//    pre-computed ParentTraceID/Position/ID on each replay event)
+	// 2) tx_id -> root trace id, for fallback when a log's LogIndex isn't in
+	//    map #1 (drift / synthetic TransactionLog)
+	logIndexToBinding := extractLogIndexToBinding(out.BlockFile.Events, out.BlockFile.ErrorEvents)
+	rootTraceByTx := extractRootTraceByTx(out.BlockFile.Traces, out.BlockFile.ErrorTraces)
+	canonicalEvents := buildCanonicalEvents(receipts, txIDs, logIndexToBinding, rootTraceByTx, height)
 
 	// Replay-vs-canonical status comparison: produces per-tx metric and log noise.
 	// Status divergence is information; the actual override + trace-strip happens
