@@ -9,6 +9,7 @@ import (
 	"github.com/Chaintable/pipeline/util"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/iotexproject/iotex-proto/golang/iotextypes"
 
 	iotexAddress "github.com/iotexproject/iotex-address/address"
 	"github.com/iotexproject/iotex-core/v2/action"
@@ -116,8 +117,15 @@ func extractRootTraceByTx(traces, errTraces []ptypes.Trace) map[string]string {
 //     so colliding hashes within one tx are impossible.
 //  3. no-binding: non-EVM action with no root trace -> leave three fields
 //     at zero value + warn.
+//
+// Events are routed to `events` (canonical Events bucket) or `errEvents`
+// (canonical ErrorEvents bucket) according to the originating receipt's
+// status — caller overrides BOTH BlockFile.Events and BlockFile.ErrorEvents
+// to avoid double-emit (callTracer also writes reverted-frame logs into
+// ErrorEvents, which canonical reconstruction now supersedes).
 type canonicalEventBuilder struct {
 	events         []ptypes.Event
+	errEvents      []ptypes.Event
 	logIdx         int64
 	bindingByTxPos map[bindingKey]eventBinding
 	rootTraceByTx  map[string]string
@@ -130,6 +138,13 @@ type canonicalEventBuilder struct {
 //
 // txIDs is the parallel list of canonical tx hashes (eth-tx-style hex with 0x
 // prefix); must match `receipts` 1:1 by index.
+//
+// Returns (successEvents, errorEvents): events from receipts with
+// Status == Success go into successEvents; everything else goes into
+// errorEvents. Caller must override BOTH BlockFile.Events and
+// BlockFile.ErrorEvents with these two slices respectively — otherwise
+// the original ErrorEvents (callTracer's reverted-frame dump) and the
+// canonical errorEvents will double-count reverted-tx logs.
 //
 // Both maps are optional (nil OK): nil degrades to the pre-binding behavior
 // where the three attribution fields are left empty.
@@ -146,9 +161,9 @@ func buildCanonicalEvents(
 	bindingByTxPos map[bindingKey]eventBinding,
 	rootTraceByTx map[string]string,
 	height uint64,
-) []ptypes.Event {
+) (successEvents, errorEvents []ptypes.Event) {
 	if len(receipts) != len(txIDs) {
-		return []ptypes.Event{}
+		return []ptypes.Event{}, []ptypes.Event{}
 	}
 
 	// Pre-compute total EVM logs in the block. Synthetic transferLogs of any tx
@@ -162,6 +177,7 @@ func buildCanonicalEvents(
 
 	b := &canonicalEventBuilder{
 		events:         make([]ptypes.Event, 0),
+		errEvents:      make([]ptypes.Event, 0),
 		bindingByTxPos: bindingByTxPos,
 		rootTraceByTx:  rootTraceByTx,
 		height:         height,
@@ -176,15 +192,16 @@ func buildCanonicalEvents(
 		priorTxLogs += uint32(len(r.TransactionLogs()))
 	}
 
-	// Sort events by LogIndex so the array order matches eth_getLogs and any
-	// downstream consumer that walks events in ascending logIndex (instead of
-	// in tx-then-receipt-section insertion order, which is non-monotonic when
-	// synthetic transferLogs of an earlier tx have a higher LogIndex than EVM
-	// logs of a later tx — see block 48125704).
-	sort.SliceStable(b.events, func(i, j int) bool {
-		return b.events[i].LogIndex < b.events[j].LogIndex
-	})
-	return b.events
+	// Sort each bucket by LogIndex so array order matches eth_getLogs and any
+	// downstream consumer walking events in ascending logIndex.
+	sortByLogIndex := func(s []ptypes.Event) {
+		sort.SliceStable(s, func(i, j int) bool {
+			return s[i].LogIndex < s[j].LogIndex
+		})
+	}
+	sortByLogIndex(b.events)
+	sortByLogIndex(b.errEvents)
+	return b.events, b.errEvents
 }
 
 // appendFromReceipt converts one receipt's EVM logs + synthetic TransactionLogs
@@ -198,6 +215,15 @@ func buildCanonicalEvents(
 // match eth_getTransactionReceipt's allocation).
 func (b *canonicalEventBuilder) appendFromReceipt(r *action.Receipt, txID string, transferLogStartIdx uint32) {
 	var inTxPos int64
+
+	// Route this receipt's events to the success or error bucket based on the
+	// canonical receipt's status. Reverted txs' logs go to errEvents only —
+	// this replaces callTracer's ErrorEvents bucket (which the caller now
+	// overrides) so the two paths don't double-emit the same logs.
+	dst := &b.events
+	if r.Status != uint64(iotextypes.ReceiptStatus_Success) {
+		dst = &b.errEvents
+	}
 
 	// EVM logs (from LOG opcodes inside contract execution).
 	for _, l := range r.Logs() {
@@ -224,7 +250,7 @@ func (b *canonicalEventBuilder) appendFromReceipt(r *action.Receipt, txID string
 		} else {
 			b.applyFallbackBinding(&ev, txID)
 		}
-		b.events = append(b.events, ev)
+		*dst = append(*dst, ev)
 		b.logIdx++
 		inTxPos++
 	}
@@ -268,7 +294,7 @@ func (b *canonicalEventBuilder) appendFromReceipt(r *action.Receipt, txID string
 		} else {
 			b.applyFallbackBinding(&ev, txID)
 		}
-		b.events = append(b.events, ev)
+		*dst = append(*dst, ev)
 		b.logIdx++
 		inTxPos++
 	}

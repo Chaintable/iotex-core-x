@@ -2719,7 +2719,7 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 		out.BlockFile.Traces, out.BlockFile.ErrorTraces,
 	)
 	rootTraceByTx := extractRootTraceByTx(out.BlockFile.Traces, out.BlockFile.ErrorTraces)
-	canonicalEvents := buildCanonicalEvents(receipts, txIDs, bindingByTxPos, rootTraceByTx, height)
+	canonicalEvents, canonicalErrEvents := buildCanonicalEvents(receipts, txIDs, bindingByTxPos, rootTraceByTx, height)
 
 	// Replay-vs-canonical status comparison: produces per-tx metric and log noise.
 	// Status divergence is information; the actual override + trace-strip happens
@@ -2745,8 +2745,11 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 		}
 	}
 
-	// Override replay-derived fields with canonical ones.
+	// Override replay-derived fields with canonical ones. Both Events and
+	// ErrorEvents are replaced — callTracer's ErrorEvents bucket (logs from
+	// reverted frames) would otherwise duplicate canonicalErrEvents.
 	out.BlockFile.Events = canonicalEvents
+	out.BlockFile.ErrorEvents = canonicalErrEvents
 	out.BlockFile.StorageContracts = storageContracts
 
 	// Build receipt-by-tx-ID lookup. Indexing receipts and BlockFile.Txs by parallel

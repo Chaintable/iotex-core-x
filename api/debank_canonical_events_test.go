@@ -20,10 +20,10 @@ import (
 
 func TestBuildCanonicalEvents_EmptyReceipts(t *testing.T) {
 	r := require.New(t)
-	out := buildCanonicalEvents(nil, nil, nil, nil, 0)
+	out, _ := buildCanonicalEvents(nil, nil, nil, nil, 0)
 	r.Empty(out)
 
-	out = buildCanonicalEvents([]*action.Receipt{}, []string{}, nil, nil, 0)
+	out, _ = buildCanonicalEvents([]*action.Receipt{}, []string{}, nil, nil, 0)
 	r.Empty(out)
 }
 
@@ -46,7 +46,7 @@ func TestBuildCanonicalEvents_FromEVMLogs(t *testing.T) {
 	})
 
 	txID := "0x" + strings.Repeat("aa", 32)
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 0)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 0)
 	r.Len(out, 1)
 
 	ev := out[0]
@@ -79,7 +79,7 @@ func TestBuildCanonicalEvents_FromTransactionLogs(t *testing.T) {
 	})
 
 	txID := "0x" + strings.Repeat("bb", 32)
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 0)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 0)
 	r.Len(out, 1)
 
 	ev := out[0]
@@ -110,7 +110,7 @@ func TestBuildCanonicalEvents_BothEVMAndTransactionLogs(t *testing.T) {
 	})
 
 	txID := "0x" + strings.Repeat("cc", 32)
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 0)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 0)
 	r.Len(out, 2, "1 EVM log + 1 synthetic log")
 	expectedProto := strings.ToLower(common.BytesToAddress(account.ProtocolAddr().Bytes()).Hex())
 	r.Equal(expectedProto, out[1].Address)
@@ -134,7 +134,7 @@ func TestBuildCanonicalEvents_NilReceiptSkipped(t *testing.T) {
 		Topics:  action.Topics{hash.Hash256b([]byte("t"))},
 		Index:   4,
 	})
-	out := buildCanonicalEvents(
+	out, _ := buildCanonicalEvents(
 		[]*action.Receipt{nil, rcpt, nil},
 		[]string{"0xaa", "0xbb", "0xcc"},
 		nil, nil, 0,
@@ -150,7 +150,7 @@ func TestBuildCanonicalEvents_LengthMismatchReturnsEmpty(t *testing.T) {
 		Address: identityset.Address(1).String(),
 		Topics:  action.Topics{hash.Hash256b([]byte("t"))},
 	})
-	out := buildCanonicalEvents(
+	out, _ := buildCanonicalEvents(
 		[]*action.Receipt{rcpt}, []string{"0x1", "0x2"},
 		nil, nil, 0,
 	)
@@ -191,7 +191,7 @@ func TestBuildCanonicalEvents_HappyPath_PreciseBinding(t *testing.T) {
 	bindingMap := map[bindingKey]eventBinding{{txID: txID, inTxIdx: 0}: binding}
 	rootMap := map[string]string{txID: "root-of-tx"}
 
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
 	r.Len(out, 1)
 	r.Equal("frame-1", out[0].ParentTraceID, "precise frame binding from (txID, inTxIdx) map")
 	r.EqualValues(7, out[0].Position)
@@ -214,7 +214,7 @@ func TestBuildCanonicalEvents_DriftFallback(t *testing.T) {
 	}
 	rootMap := map[string]string{txID: "root-tx-drift"}
 
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
 	r.Len(out, 2)
 
 	// log[0]: precise
@@ -234,7 +234,7 @@ func TestBuildCanonicalEvents_NilMapsLeavesBindingEmpty(t *testing.T) {
 	txID := "0x" + strings.Repeat("cc", 32)
 	rcpt := mkEVMRcpt("tx-nil", 0, 1)
 
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, nil, 100)
 	r.Len(out, 1)
 	r.Empty(out[0].ParentTraceID)
 	r.EqualValues(0, out[0].Position)
@@ -266,7 +266,7 @@ func TestBuildCanonicalEvents_Synthetic_FallbackWhenUnboundReplay(t *testing.T) 
 	}
 	rootMap := map[string]string{txID: "root-synth"}
 
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
 	r.Len(out, 1)
 	r.Equal("root-synth", out[0].ParentTraceID, "no (txID, inTxIdx) match -> fallback to root")
 	r.EqualValues(0, out[0].Position)
@@ -301,7 +301,7 @@ func TestBuildCanonicalEvents_Synthetic_PreciseBindingWhenReplayMatched(t *testi
 	}
 	rootMap := map[string]string{txID: "root-synth-bound"}
 
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
 	r.Len(out, 1)
 	r.Equal("synthetic-frame", out[0].ParentTraceID, "synthetic log uses precise binding when present")
 	r.EqualValues(11, out[0].Position)
@@ -327,7 +327,7 @@ func TestBuildCanonicalEvents_Synthetic_NoRootTrace(t *testing.T) {
 	bindingMap := map[bindingKey]eventBinding{}
 	rootMap := map[string]string{} // tx not present
 
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, bindingMap, rootMap, 100)
 	r.Len(out, 1)
 	r.Empty(out[0].ParentTraceID, "no root trace -> binding left empty + warn (not crash)")
 	r.EqualValues(0, out[0].Position)
@@ -359,7 +359,7 @@ func TestBuildCanonicalEvents_MixedTx(t *testing.T) {
 		// tx2 missing on purpose (non-EVM)
 	}
 
-	out := buildCanonicalEvents([]*action.Receipt{r1, r2}, []string{tx1, tx2}, bindingMap, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{r1, r2}, []string{tx1, tx2}, bindingMap, rootMap, 100)
 	r.Len(out, 3, "1 EVM + 1 synthetic (tx1) + 1 synthetic (tx2)")
 
 	// tx1 EVM log: precise
@@ -384,7 +384,7 @@ func TestBuildCanonicalEvents_IDNoCollisionAcrossFallbacks(t *testing.T) {
 	}
 
 	rootMap := map[string]string{txID: "root-many"}
-	out := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, rootMap, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rcpt}, []string{txID}, nil, rootMap, 100)
 	r.Len(out, 3)
 
 	seen := make(map[string]struct{})
@@ -426,7 +426,7 @@ func TestBuildCanonicalEvents_TransferLogIdxMatchesEthAPI(t *testing.T) {
 	rB := mkEVMRcpt("tx-B", 5, 1)
 	rB.TxIndex = 1
 
-	out := buildCanonicalEvents([]*action.Receipt{rA, rB}, []string{txA, txB}, nil, nil, 100)
+	out, _ := buildCanonicalEvents([]*action.Receipt{rA, rB}, []string{txA, txB}, nil, nil, 100)
 	r.Len(out, 5+4+1, "5 EVM (tx-A) + 4 synthetic (tx-A) + 1 EVM (tx-B)")
 
 	// Events are sorted by LogIndex ascending (Step 6). After sort:
@@ -444,6 +444,63 @@ func TestBuildCanonicalEvents_TransferLogIdxMatchesEthAPI(t *testing.T) {
 	// Verify the array is sorted by LogIndex (ascending).
 	for i := 1; i < len(out); i++ {
 		r.LessOrEqual(out[i-1].LogIndex, out[i].LogIndex, "events must be sorted by LogIndex")
+	}
+}
+
+// TestBuildCanonicalEvents_RevertedTxRoutesToErrorBucket verifies the
+// reverted-tx double-emit fix (block 48153304 found in 500-block sweep).
+// A reverted receipt's logs must go to errorEvents only, never to events,
+// because the caller now overrides BlockFile.ErrorEvents with this bucket
+// (replacing callTracer's reverted-frame dump that previously double-counted).
+func TestBuildCanonicalEvents_RevertedTxRoutesToErrorBucket(t *testing.T) {
+	r := require.New(t)
+	txSucc := "0x" + strings.Repeat("01", 32)
+	txFail := "0x" + strings.Repeat("02", 32)
+
+	// Successful tx: 1 EVM log + 1 TransactionLog
+	rOk := mkEVMRcpt("rok", 0, 1)
+	rOk.Status = uint64(iotextypes.ReceiptStatus_Success)
+	rOk.AddTransactionLogs(&action.TransactionLog{
+		Type:      iotextypes.TransactionLogType_IN_CONTRACT_TRANSFER,
+		Amount:    big.NewInt(1),
+		Sender:    identityset.Address(2).String(),
+		Recipient: identityset.Address(3).String(),
+	})
+
+	// Reverted tx: 1 EVM log + 2 TransactionLogs (typical pattern from
+	// rewarding handler refunding gas in a reverted action)
+	rErr := mkEVMRcpt("rerr", 1, 1)
+	rErr.Status = uint64(iotextypes.ReceiptStatus_ErrExecutionReverted)
+	rErr.AddTransactionLogs(&action.TransactionLog{
+		Type:      iotextypes.TransactionLogType_IN_CONTRACT_TRANSFER,
+		Amount:    big.NewInt(2),
+		Sender:    identityset.Address(2).String(),
+		Recipient: identityset.Address(3).String(),
+	})
+	rErr.AddTransactionLogs(&action.TransactionLog{
+		Type:      iotextypes.TransactionLogType_IN_CONTRACT_TRANSFER,
+		Amount:    big.NewInt(3),
+		Sender:    identityset.Address(4).String(),
+		Recipient: identityset.Address(5).String(),
+	})
+
+	out, errOut := buildCanonicalEvents(
+		[]*action.Receipt{rOk, rErr},
+		[]string{txSucc, txFail},
+		nil, nil, 100,
+	)
+
+	// Success bucket: just rOk's contents (1 EVM + 1 synthetic = 2 events)
+	r.Len(out, 2, "success bucket holds only the successful tx's events")
+	// Error bucket: just rErr's contents (1 EVM + 2 synthetic = 3 events)
+	r.Len(errOut, 3, "error bucket holds only the reverted tx's events")
+	// No cross-contamination:
+	for _, ev := range out {
+		// out[*] must not contain any rErr-sourced log; all of rErr's logs
+		// happen to be Address(2)/Address(3) recipients which don't appear
+		// in rOk's logs, but the structural invariant we want is just count
+		// and bucket assignment — already verified above.
+		_ = ev
 	}
 }
 
