@@ -192,11 +192,37 @@ func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	t.pendingLogs = append(t.pendingLogs, l)
 }
 
-// EmitTransferLog bypasses the captureStarted gate to buffer a log converted
-// from a native TransactionLog (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE,
-// BUCKET_CREATE_AMOUNT, etc.). Called from the CaptureTx callback so non-EVM
-// actions can still expose their pool flows as events. Like OnLog, these are
-// buffered and only committed to the inner tracer at CaptureTxEnd flush.
+// EmitTransferLog forwards a log converted from a native TransactionLog
+// (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE, BUCKET_CREATE_AMOUNT, ...) or
+// from receipt.Logs() of a non-Execution action directly into the inner
+// callTracer, bypassing the pendingLogs buffer.
+//
+// Direct emit (instead of buffering through pendingLogs + flushPendingLogs at
+// CaptureTxEnd) is necessary because the cleanup closure in evm/tracer.go
+// runs:
+//
+//	(1) CaptureEnd
+//	(2) EmitTransferLogs(receipt, ...)   <- pushes synthetic logs in
+//	(3) CaptureTxEnd                     <- meant to flush, but ...
+//	(4) CaptureTx -> OnTxEnd
+//
+// For Execution actions, by the time (3) runs from the cleanup closure, the
+// inner CaptureTxEnd from evm.go's defer has already executed (it fires from
+// executeInEVM's defer, before the cleanup closure even runs) and set
+// txStarted=false. The outer CaptureTxEnd in (3) then short-circuits via
+// `if !txStarted return`, so flushPendingLogs is skipped — and any logs
+// EmitTransferLogs queued in (2) stay in pendingLogs, leaking to the next
+// tx's flush.
+//
+// Direct OnLog dispatch sidesteps this entirely: the log is committed to the
+// current tx's callTracer (attached to callstack[top], which after CaptureEnd
+// is the root frame) before any state-machine ordering matters.
+//
+// There's no Simulate-discard concern because EmitTransferLog only runs from
+// the success branch of the cleanup closure (the failure branch goes to
+// DiscardPendingLogs and never calls EmitTransferLogs).
 func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
-	t.pendingLogs = append(t.pendingLogs, l)
+	l.Index = t.logIndex
+	t.logIndex++
+	t.inner.OnLog(l)
 }

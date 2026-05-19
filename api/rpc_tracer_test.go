@@ -55,14 +55,22 @@ func TestIotexRPCTracerOnLogBuffering(t *testing.T) {
 		require.Empty(t, tr.pendingLogs, "pre-CaptureStart OnLog must be ignored")
 	})
 
-	t.Run("EmitTransferLog bypasses captureStarted gate and buffers", func(t *testing.T) {
+	t.Run("EmitTransferLog forwards directly to inner.OnLog and advances logIndex immediately", func(t *testing.T) {
+		// Synthetic logs from EmitTransferLogs fire after CaptureEnd in the
+		// cleanup closure (captureStarted=false at that point). Buffering them
+		// in pendingLogs would risk losing them to the txStarted=false short-
+		// circuit in the outer CaptureTxEnd (set by evm.go's inner defer).
+		// Direct emit fixes that.
 		tr := newIotexRPCTracer(1)
-		tr.captureStarted = false // synthetic logs fire after CaptureEnd
+		tr.captureStarted = false
 		tr.txStarted = true
 
-		tr.EmitTransferLog(&types.Log{Address: common.HexToAddress("0xccd3")})
-		require.Len(t, tr.pendingLogs, 1, "synthetic logs buffer regardless of captureStarted")
-		require.Equal(t, uint(0), tr.logIndex, "logIndex must not advance until flush")
+		l := &types.Log{Address: common.HexToAddress("0xccd3")}
+		tr.EmitTransferLog(l)
+
+		require.Empty(t, tr.pendingLogs, "synthetic logs go straight to inner.OnLog, not pendingLogs")
+		require.Equal(t, uint(1), tr.logIndex, "EmitTransferLog must advance logIndex")
+		require.EqualValues(t, 0, l.Index, "the emitted log carries the assigned block-global Index")
 	})
 
 	t.Run("Discard then next action's logs index from 0", func(t *testing.T) {

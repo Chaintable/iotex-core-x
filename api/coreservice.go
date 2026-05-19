@@ -2705,13 +2705,21 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 		}
 	}
 	// Build trace-binding maps from replay output before we overwrite events:
-	// 1) action.Log.Index -> precise frame binding (from callTracer's
-	//    pre-computed ParentTraceID/Position/ID on each replay event)
-	// 2) tx_id -> root trace id, for fallback when a log's LogIndex isn't in
-	//    map #1 (drift / synthetic TransactionLog)
-	logIndexToBinding := extractLogIndexToBinding(out.BlockFile.Events, out.BlockFile.ErrorEvents)
+	// 1) (txID, in_tx_log_idx) -> precise frame binding (callTracer's
+	//    pre-computed ParentTraceID/Position/ID per replay event). The key is
+	//    (txID, in-tx ordinal) rather than the global LogIndex because iotex's
+	//    receipt-side `r.Logs()[i].Index` and callTracer's flush-side counter
+	//    can disagree when interleaved emission allocates non-contiguous
+	//    Indices to the same tx's logs.
+	// 2) tx_id -> root trace id, for fallback when a log has no precise
+	//    (txID, inTxIdx) entry (synthetic TransactionLog with no paired
+	//    callTracer event, or replay-side drift).
+	bindingByTxPos := extractBindingByTxPos(
+		out.BlockFile.Events, out.BlockFile.ErrorEvents,
+		out.BlockFile.Traces, out.BlockFile.ErrorTraces,
+	)
 	rootTraceByTx := extractRootTraceByTx(out.BlockFile.Traces, out.BlockFile.ErrorTraces)
-	canonicalEvents := buildCanonicalEvents(receipts, txIDs, logIndexToBinding, rootTraceByTx, height)
+	canonicalEvents := buildCanonicalEvents(receipts, txIDs, bindingByTxPos, rootTraceByTx, height)
 
 	// Replay-vs-canonical status comparison: produces per-tx metric and log noise.
 	// Status divergence is information; the actual override + trace-strip happens
