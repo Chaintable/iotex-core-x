@@ -192,37 +192,39 @@ func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	t.pendingLogs = append(t.pendingLogs, l)
 }
 
-// EmitTransferLog forwards a log converted from a native TransactionLog
+// EmitTransferLog stages a log converted from a native TransactionLog
 // (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE, BUCKET_CREATE_AMOUNT, ...) or
-// from receipt.Logs() of a non-Execution action directly into the inner
-// callTracer, bypassing the pendingLogs buffer.
+// from receipt.Logs() of a non-Execution action into pendingLogs, to be
+// flushed in CaptureTxEnd alongside the EVM logs already queued by OnLog.
 //
-// Direct emit (instead of buffering through pendingLogs + flushPendingLogs at
-// CaptureTxEnd) is necessary because the cleanup closure in evm/tracer.go
-// runs:
+// Ordering relative to canonical-events rebuild matters:
 //
-//	(1) CaptureEnd
-//	(2) EmitTransferLogs(receipt, ...)   <- pushes synthetic logs in
-//	(3) CaptureTxEnd                     <- meant to flush, but ...
-//	(4) CaptureTx -> OnTxEnd
+// The cleanup closure in evm/tracer.go runs (1) CaptureEnd → (2)
+// EmitTransferLogs(receipt, ...) → (3) CaptureTxEnd. Canonical-events
+// rebuild in debank_canonical_events.go iterates each receipt as
+// r.Logs() (EVM) first, then r.TransferLogs() (synthetic). For the
+// (txID, InTxLogIdx) binding map to align with that iteration, the
+// inner callTracer must stamp InTxLogIdx onto EVM logs first and
+// synthetic logs second.
 //
-// For Execution actions, by the time (3) runs from the cleanup closure, the
-// inner CaptureTxEnd from evm.go's defer has already executed (it fires from
-// executeInEVM's defer, before the cleanup closure even runs) and set
-// txStarted=false. The outer CaptureTxEnd in (3) then short-circuits via
-// `if !txStarted return`, so flushPendingLogs is skipped — and any logs
-// EmitTransferLogs queued in (2) stay in pendingLogs, leaking to the next
-// tx's flush.
+// Buffering both into pendingLogs and flushing in CaptureTxEnd gives
+// exactly that: EVM LOG opcodes append during EVM execution (already
+// queued before step 2), then EmitTransferLog appends synthetic logs
+// in step 2, then flushPendingLogs forwards in append order. Earlier
+// versions bypassed pendingLogs because the wrapper layer's inner
+// CaptureTxEnd would clear txStarted before the outer flush ran;
+// tracerWrapper's txDepth tracking now suppresses that nested
+// CaptureTxEnd, so the outer flush in step 3 always runs and the
+// buffer path is safe again.
 //
-// Direct OnLog dispatch sidesteps this entirely: the log is committed to the
-// current tx's callTracer (attached to callstack[top], which after CaptureEnd
-// is the root frame) before any state-machine ordering matters.
-//
-// There's no Simulate-discard concern because EmitTransferLog only runs from
-// the success branch of the cleanup closure (the failure branch goes to
-// DiscardPendingLogs and never calls EmitTransferLogs).
+// DiscardPendingLogs concern: EmitTransferLog only runs from the
+// success branch of the cleanup closure (failure branch calls
+// DiscardPendingLogs before adding any synthetic, and never calls
+// EmitTransferLogs), so synthetic logs are never staged on a path
+// that would also drop them.
 func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
-	l.Index = t.logIndex
-	t.logIndex++
-	t.inner.OnLog(l)
+	if !t.txStarted {
+		return
+	}
+	t.pendingLogs = append(t.pendingLogs, l)
 }
