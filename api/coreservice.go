@@ -2572,7 +2572,23 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 	}
 
 	// set up tracer context
-	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer})
+	// Wrap rpcTracer with NewTracerWrapper so the EVMLogger interface translates
+	// nested re-entries into CaptureEnter calls instead of stacking CaptureStart
+	// frames. Without this, iotex actions whose handler internally invokes
+	// ExecuteContract (e.g. MigrateStake's stake0 sub-call) trigger two
+	// CaptureStart events on the same tx — one from evm/tracer.go:122-125 (the
+	// non-Execution branch) and one from go-ethereum's EVM.Call at depth 0 —
+	// leaving the pipeline callstack at length 2, so callTracer.OnTxEnd's
+	// `len(callstack) == 1` guard skips trace emission and the entire trace
+	// tree (plus its attributed events) is dropped.
+	//
+	// debug_traceBlockByHash uses the same wrapper at web3server_utils.go,
+	// which is why its callTracer output remains correct on these txs.
+	//
+	// We keep `rpcTracer` (the unwrapped reference) for direct calls below
+	// (OnLog, OnTxEnd, currentIdx, EmitTransferLog, DiscardPendingLogs) —
+	// those bypass the EVMLogger path and need the wrapper-less object.
+	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: evm.NewTracerWrapper(rpcTracer)})
 	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
 		CaptureTx: func(retval []byte, receipt *action.Receipt) {
 			idx := rpcTracer.currentIdx
