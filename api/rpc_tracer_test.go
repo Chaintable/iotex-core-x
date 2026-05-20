@@ -4,10 +4,13 @@
 package api
 
 import (
+	"fmt"
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/stretchr/testify/require"
 )
 
@@ -112,10 +115,10 @@ func TestIotexRPCTracerOnLogBuffering(t *testing.T) {
 		tr.EmitTransferLog(syn1)
 
 		require.Len(t, tr.pendingLogs, 4)
-		require.Same(t, evm0, tr.pendingLogs[0], "EVM log #0 must come first")
-		require.Same(t, evm1, tr.pendingLogs[1], "EVM log #1 must come second")
-		require.Same(t, syn0, tr.pendingLogs[2], "synthetic #0 must come after EVM logs")
-		require.Same(t, syn1, tr.pendingLogs[3], "synthetic #1 must come last")
+		require.Same(t, evm0, tr.pendingLogs[0].log, "EVM log #0 must come first")
+		require.Same(t, evm1, tr.pendingLogs[1].log, "EVM log #1 must come second")
+		require.Same(t, syn0, tr.pendingLogs[2].log, "synthetic #0 must come after EVM logs")
+		require.Same(t, syn1, tr.pendingLogs[3].log, "synthetic #1 must come last")
 	})
 
 	t.Run("Discard then next action's logs index from 0", func(t *testing.T) {
@@ -141,8 +144,8 @@ func TestIotexRPCTracerOnLogBuffering(t *testing.T) {
 
 		// Assign indices as flush would do (but skip inner to avoid
 		// depending on closed-source ptracer state).
-		for _, l := range tr.pendingLogs {
-			l.Index = tr.logIndex
+		for i := range tr.pendingLogs {
+			tr.pendingLogs[i].log.Index = tr.logIndex
 			tr.logIndex++
 		}
 		tr.pendingLogs = tr.pendingLogs[:0]
@@ -150,5 +153,152 @@ func TestIotexRPCTracerOnLogBuffering(t *testing.T) {
 		require.Equal(t, uint(0), l2a.Index, "action 2 first log indexes from 0")
 		require.Equal(t, uint(1), l2b.Index)
 		require.Equal(t, uint(2), tr.logIndex)
+	})
+}
+
+// TestIotexRPCTracerStackAndSnapshot covers the parallel stack/path used to
+// snapshot a log's trace_address + position at OnLog time so the deferred
+// flush can call inner.InsertLog with the right attribution.
+//
+// The inner ptracer.RPCTracer's callTracer is nil here (no OnTxStart was ever
+// called), so its CaptureStart / CaptureEnter / CaptureExit / CaptureEnd are
+// safe no-ops — we drive the wrapper directly through its EVMLogger hooks.
+func TestIotexRPCTracerStackAndSnapshot(t *testing.T) {
+	openTracer := func() *iotexRPCTracer {
+		tr := newIotexRPCTracer(1)
+		tr.CaptureTxStart(0)
+		tr.CaptureStart(nil, common.Address{}, common.Address{}, false, nil, 0, big.NewInt(0))
+		return tr
+	}
+	enterCall := func(tr *iotexRPCTracer) {
+		tr.CaptureEnter(vm.CALL, common.Address{}, common.Address{}, nil, 0, big.NewInt(0))
+	}
+
+	t.Run("CaptureStart installs root frame with empty path", func(t *testing.T) {
+		tr := openTracer()
+		require.Len(t, tr.stack, 1)
+		require.Equal(t, frameCtx{}, tr.stack[0])
+		require.Empty(t, tr.path)
+	})
+
+	t.Run("CaptureEnter pushes child, advances parent.childCount, extends path", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		require.Len(t, tr.stack, 2)
+		require.Equal(t, int64(1), tr.stack[0].childCount, "root counts the new child")
+		require.Equal(t, frameCtx{}, tr.stack[1], "child starts fresh")
+		require.Equal(t, []int64{0}, tr.path, "child's trace_address index = 0")
+	})
+
+	t.Run("CaptureExit pops stack and path, parent.childCount survives", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+		require.Len(t, tr.stack, 1)
+		require.Empty(t, tr.path)
+		require.Equal(t, int64(1), tr.stack[0].childCount, "childCount records the finalized sub-call")
+	})
+
+	t.Run("CaptureEnd keeps root so EmitTransferLog can snapshot it", func(t *testing.T) {
+		tr := openTracer()
+		tr.CaptureEnd(nil, 0, nil)
+		require.Len(t, tr.stack, 1, "root frame must survive CaptureEnd")
+		require.False(t, tr.captureStarted)
+	})
+
+	t.Run("CaptureTxStart resets a stale stack/path as a safety net", func(t *testing.T) {
+		tr := newIotexRPCTracer(1)
+		tr.stack = []frameCtx{{childCount: 99}, {childCount: 5}}
+		tr.path = []int64{42}
+		tr.CaptureTxStart(0)
+		require.Empty(t, tr.stack)
+		require.Empty(t, tr.path)
+	})
+
+	t.Run("3 levels of nested CaptureEnter give path [0,0,0]", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		enterCall(tr)
+		enterCall(tr)
+		require.Len(t, tr.stack, 4)
+		require.Equal(t, []int64{0, 0, 0}, tr.path)
+	})
+
+	t.Run("a failed sub-call still occupies a trace_address index", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, fmt.Errorf("revert")) // EVM emits CaptureExit even for reverted call
+		enterCall(tr)
+		require.Equal(t, []int64{1}, tr.path, "second child indexes after the failed sibling")
+	})
+
+	t.Run("OnLog at depth 2 snapshots trace_address [0,0] and position 0", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		enterCall(tr)
+		l := &types.Log{Address: common.HexToAddress("0xdead")}
+		tr.OnLog(l)
+		require.Len(t, tr.pendingLogs, 1)
+		require.Same(t, l, tr.pendingLogs[0].log)
+		require.Equal(t, []int64{0, 0}, tr.pendingLogs[0].traceAddress)
+		require.Equal(t, int64(0), tr.pendingLogs[0].position, "no prior sub-calls or logs in this frame")
+	})
+
+	t.Run("position counts finalized sub-calls plus prior logs in the same frame", func(t *testing.T) {
+		tr := openTracer()
+		// root.calls[0]: one finalized sub-call → root.childCount=1
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa1")}) // position = 1 + 0
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa2")}) // position = 1 + 1
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa3")}) // position = 2 + 2
+
+		require.Len(t, tr.pendingLogs, 3)
+		require.Equal(t, int64(1), tr.pendingLogs[0].position)
+		require.Equal(t, int64(2), tr.pendingLogs[1].position)
+		require.Equal(t, int64(4), tr.pendingLogs[2].position)
+		for _, p := range tr.pendingLogs {
+			require.Empty(t, p.traceAddress, "all three logs are on root")
+		}
+	})
+
+	t.Run("snapshot path copies are independent (mutation safety)", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa1")}) // snapshot at path=[0]
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa2")}) // snapshot at path=[0,0]
+
+		require.Equal(t, []int64{0}, tr.pendingLogs[0].traceAddress,
+			"first snapshot must be a copy unaffected by later CaptureEnter")
+		require.Equal(t, []int64{0, 0}, tr.pendingLogs[1].traceAddress)
+
+		// Mutate the tracer's path further to prove the snapshots are detached.
+		tr.path = append(tr.path, 99)
+		require.Equal(t, []int64{0}, tr.pendingLogs[0].traceAddress)
+		require.Equal(t, []int64{0, 0}, tr.pendingLogs[1].traceAddress)
+	})
+
+	t.Run("EmitTransferLog after CaptureEnd snapshots root attribution", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil) // root.childCount = 1
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa1")}) // root, position = 1
+		tr.CaptureEnd(nil, 0, nil)
+		tr.EmitTransferLog(&types.Log{Address: common.HexToAddress("0xccd3")})
+
+		require.Len(t, tr.pendingLogs, 2)
+		require.Empty(t, tr.pendingLogs[1].traceAddress, "synthetic lands on root")
+		require.Equal(t, int64(2), tr.pendingLogs[1].position,
+			"position = root.childCount(1) + root.logCount-before(1) = 2")
+	})
+
+	t.Run("CaptureExit guards against underflow on stack", func(t *testing.T) {
+		tr := openTracer()
+		// only root in stack → CaptureExit should NOT pop root (stack len would go to 0)
+		tr.CaptureExit(nil, 0, nil)
+		require.Len(t, tr.stack, 1, "CaptureExit must not pop root")
 	})
 }
