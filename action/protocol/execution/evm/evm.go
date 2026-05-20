@@ -597,11 +597,14 @@ func executeInEVM(ctx context.Context, evmParams *Params, stateDB stateDB) ([]by
 				contractRawAddress = contractAddress.String()
 			}
 		}
-		// ret updates may need hard fork
-		// so we change it only when readonly mode now
-		if evmParams.actionCtx.ReadOnly {
-			ret = createRet
-		}
+		// CREATE return value is the deployed bytecode. receipt.Output is an
+		// in-memory-only field (see action/receipt.go: "not serialized to DB")
+		// not covered by consensus / receipts hash, so propagating it here is
+		// safe and does not require a fork. Without this, trace_debankBlock
+		// reports an empty `output` field on every CREATE trace, contradicting
+		// debug_traceBlockByHash (which observes the deployed bytecode directly
+		// via the EVMLogger interface).
+		ret = createRet
 	} else {
 		stateDB.SetNonce(evmParams.txCtx.Origin, stateDB.GetNonce(evmParams.txCtx.Origin)+1)
 		// process contract

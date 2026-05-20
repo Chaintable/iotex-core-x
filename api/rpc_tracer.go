@@ -192,11 +192,39 @@ func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	t.pendingLogs = append(t.pendingLogs, l)
 }
 
-// EmitTransferLog bypasses the captureStarted gate to buffer a log converted
-// from a native TransactionLog (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE,
-// BUCKET_CREATE_AMOUNT, etc.). Called from the CaptureTx callback so non-EVM
-// actions can still expose their pool flows as events. Like OnLog, these are
-// buffered and only committed to the inner tracer at CaptureTxEnd flush.
+// EmitTransferLog stages a log converted from a native TransactionLog
+// (GRANT_REWARD, CLAIM_FROM_REWARDING, GAS_FEE, BUCKET_CREATE_AMOUNT, ...) or
+// from receipt.Logs() of a non-Execution action into pendingLogs, to be
+// flushed in CaptureTxEnd alongside the EVM logs already queued by OnLog.
+//
+// Ordering relative to canonical-events rebuild matters:
+//
+// The cleanup closure in evm/tracer.go runs (1) CaptureEnd → (2)
+// EmitTransferLogs(receipt, ...) → (3) CaptureTxEnd. Canonical-events
+// rebuild in debank_canonical_events.go iterates each receipt as
+// r.Logs() (EVM) first, then r.TransferLogs() (synthetic). For the
+// (txID, InTxLogIdx) binding map to align with that iteration, the
+// inner callTracer must stamp InTxLogIdx onto EVM logs first and
+// synthetic logs second.
+//
+// Buffering both into pendingLogs and flushing in CaptureTxEnd gives
+// exactly that: EVM LOG opcodes append during EVM execution (already
+// queued before step 2), then EmitTransferLog appends synthetic logs
+// in step 2, then flushPendingLogs forwards in append order. Earlier
+// versions bypassed pendingLogs because the wrapper layer's inner
+// CaptureTxEnd would clear txStarted before the outer flush ran;
+// tracerWrapper's txDepth tracking now suppresses that nested
+// CaptureTxEnd, so the outer flush in step 3 always runs and the
+// buffer path is safe again.
+//
+// DiscardPendingLogs concern: EmitTransferLog only runs from the
+// success branch of the cleanup closure (failure branch calls
+// DiscardPendingLogs before adding any synthetic, and never calls
+// EmitTransferLogs), so synthetic logs are never staged on a path
+// that would also drop them.
 func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
+	if !t.txStarted {
+		return
+	}
 	t.pendingLogs = append(t.pendingLogs, l)
 }

@@ -158,7 +158,10 @@ func TestOverrideTxs_InterleavedNativeActions(t *testing.T) {
 	r.EqualValues(8888, out.BlockFile.Txs[1].GasUsed.Int64())
 }
 
-func TestOverrideTxs_DivergedReplayFail_StripAndSynthesize(t *testing.T) {
+// Replay said FAIL but canonical says SUCCESS: only tx-level fields are
+// overridden; the replay's full trace tree (including the failed root that
+// represented the action being run at replay time) is preserved.
+func TestOverrideTxs_DivergedReplayFail_PreservesTraces(t *testing.T) {
 	r := require.New(t)
 	tx0ID := padTxID("0xb0")
 	tx1ID := padTxID("0xb1")
@@ -194,29 +197,22 @@ func TestOverrideTxs_DivergedReplayFail_StripAndSynthesize(t *testing.T) {
 
 	diverged := overrideTxsAndStripDivergedTraces(out, receipts)
 	r.Equal(1, diverged)
-	r.True(out.BlockFile.Txs[0].Status, "tx0 status overridden to canonical success")
+	// tx0 fields overridden to canonical
+	r.True(out.BlockFile.Txs[0].Status)
 	r.EqualValues(7777, out.BlockFile.Txs[0].GasUsed.Int64())
-	r.Empty(out.BlockFile.ErrorTraces)
-	r.Len(out.BlockFile.Traces, 2)
-	var synth *ptypes.Trace
-	for i := range out.BlockFile.Traces {
-		if out.BlockFile.Traces[i].TxID == tx0ID {
-			synth = &out.BlockFile.Traces[i]
-		}
-	}
-	r.NotNil(synth, "canonical-minimal trace synthesized for diverged tx0")
-	r.Equal("0xsender0", synth.From)
-	r.Equal("0xcontract", synth.To)
-	r.EqualValues(7777, synth.GasUsed.Int64())
-	r.Equal("call", synth.CallCreateType)
-	r.EqualValues(0, synth.Subtraces)
-	r.Empty(synth.Output)
-	r.Empty(synth.Error)
-	r.Len(out.BlockFile.ErrorEvents, 1)
-	r.Equal("0xunaffected", out.BlockFile.ErrorEvents[0].Address)
+	// Trace tree untouched — both buckets preserved as-is
+	r.Len(out.BlockFile.Traces, 1, "tx1's trace stays")
+	r.Equal(otherTraceID, out.BlockFile.Traces[0].ID)
+	r.Len(out.BlockFile.ErrorTraces, 1, "tx0's diverged trace preserved (was previously dropped)")
+	r.Equal(failedTraceID, out.BlockFile.ErrorTraces[0].ID)
+	// ErrorEvents untouched
+	r.Len(out.BlockFile.ErrorEvents, 2)
 }
 
-func TestOverrideTxs_DivergedReplaySuccess_StripAndSynthesize(t *testing.T) {
+// Replay said SUCCESS but canonical says REVERT: only tx-level fields are
+// overridden; replay's trace tree (including any sub-frames the SUCCESS replay
+// produced) is preserved for diagnostic value.
+func TestOverrideTxs_DivergedReplaySuccess_PreservesTraces(t *testing.T) {
 	r := require.New(t)
 	tx0ID := padTxID("0xc0")
 	out := &ptypes.DebankOutPut{
@@ -227,31 +223,28 @@ func TestOverrideTxs_DivergedReplaySuccess_StripAndSynthesize(t *testing.T) {
 					Value: (*hexutil.Big)(big.NewInt(0))},
 			},
 			Traces: []ptypes.Trace{
-				{ID: "wrong-success-1", TxID: tx0ID},
-				{ID: "wrong-success-2", TxID: tx0ID},
+				{ID: "replay-frame-root", TxID: tx0ID, TraceAddress: []int64{}},
+				{ID: "replay-frame-sub",  TxID: tx0ID, TraceAddress: []int64{0}},
 			},
 		},
 	}
-	r1 := mkReceipt(tx0ID, uint64(iotextypes.ReceiptStatus_ErrExecutionReverted), 9999)
-	r1.SetExecutionRevertMsg("OOG in inner call")
-	receipts := mkReceiptMap(tx0ID, r1)
+	rcpt := mkReceipt(tx0ID, uint64(iotextypes.ReceiptStatus_ErrExecutionReverted), 9999)
+	receipts := mkReceiptMap(tx0ID, rcpt)
 
 	diverged := overrideTxsAndStripDivergedTraces(out, receipts)
 	r.Equal(1, diverged)
+	// tx fields overridden
 	r.False(out.BlockFile.Txs[0].Status)
-	r.Empty(out.BlockFile.Traces, "wrong success traces dropped")
-	r.Len(out.BlockFile.ErrorTraces, 1, "synthesized minimal in ErrorTraces")
-
-	synth := out.BlockFile.ErrorTraces[0]
-	r.Equal(tx0ID, synth.TxID)
-	r.Equal("0xsender", synth.From)
-	r.Equal("0xtarget", synth.To)
-	r.EqualValues(9999, synth.GasUsed.Int64())
-	r.Contains(synth.Error, "execution reverted")
-	r.Contains(synth.Error, "OOG in inner call")
+	r.EqualValues(9999, out.BlockFile.Txs[0].GasUsed.Int64())
+	// Trace tree preserved as-is in the original Traces bucket
+	// (we don't move it to ErrorTraces — that would also lose downstream
+	// data, and the per-frame `.error` field on each trace is the right
+	// source of truth for "did THIS frame fail" anyway).
+	r.Len(out.BlockFile.Traces, 2, "both replay frames kept")
+	r.Empty(out.BlockFile.ErrorTraces)
 }
 
-func TestOverrideTxs_DivergedSynthesizeCreate(t *testing.T) {
+func TestOverrideTxs_DivergedCreate_PreservesTraces(t *testing.T) {
 	r := require.New(t)
 	createTxID := padTxID("0xd0")
 	out := &ptypes.DebankOutPut{
@@ -261,7 +254,7 @@ func TestOverrideTxs_DivergedSynthesizeCreate(t *testing.T) {
 					Gas: big.NewInt(0), GasUsed: big.NewInt(0)},
 			},
 			Traces: []ptypes.Trace{
-				{ID: "wrong-tx0-success", TxID: createTxID},
+				{ID: "replay-create-root", TxID: createTxID, CallCreateType: "create"},
 			},
 		},
 	}
@@ -269,9 +262,10 @@ func TestOverrideTxs_DivergedSynthesizeCreate(t *testing.T) {
 		createTxID, mkReceipt(createTxID, uint64(iotextypes.ReceiptStatus_Success), 50000),
 	)
 	overrideTxsAndStripDivergedTraces(out, receipts)
+	// Trace preserved untouched
 	r.Len(out.BlockFile.Traces, 1)
+	r.Equal("replay-create-root", out.BlockFile.Traces[0].ID)
 	r.Equal("create", out.BlockFile.Traces[0].CallCreateType)
-	r.Empty(out.BlockFile.Traces[0].CallType, "CREATE has empty CallType")
 }
 
 func TestOverrideTxs_NoDivergence_KeepsTracesIntact(t *testing.T) {

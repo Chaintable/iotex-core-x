@@ -55,14 +55,67 @@ func TestIotexRPCTracerOnLogBuffering(t *testing.T) {
 		require.Empty(t, tr.pendingLogs, "pre-CaptureStart OnLog must be ignored")
 	})
 
-	t.Run("EmitTransferLog bypasses captureStarted gate and buffers", func(t *testing.T) {
+	t.Run("EmitTransferLog stages synthetic into pendingLogs (no immediate flush)", func(t *testing.T) {
+		// Synthetic logs from EmitTransferLogs fire after CaptureEnd in the
+		// cleanup closure but BEFORE the outer CaptureTxEnd. They must enter
+		// the same pendingLogs queue as EVM logs so that
+		// (1) canonical-events rebuild's iteration order (r.Logs() then
+		//     r.TransferLogs()) matches the order the inner callTracer
+		//     receives them, and
+		// (2) the (txID, InTxLogIdx) binding is consistent end-to-end.
+		// The wrapper's txDepth tracking keeps txStarted=true here so the
+		// outer CaptureTxEnd will still flush.
 		tr := newIotexRPCTracer(1)
-		tr.captureStarted = false // synthetic logs fire after CaptureEnd
+		tr.captureStarted = false // post-CaptureEnd, pre-CaptureTxEnd
 		tr.txStarted = true
 
-		tr.EmitTransferLog(&types.Log{Address: common.HexToAddress("0xccd3")})
-		require.Len(t, tr.pendingLogs, 1, "synthetic logs buffer regardless of captureStarted")
-		require.Equal(t, uint(0), tr.logIndex, "logIndex must not advance until flush")
+		l := &types.Log{Address: common.HexToAddress("0xccd3")}
+		tr.EmitTransferLog(l)
+
+		require.Len(t, tr.pendingLogs, 1, "synthetic log must be staged into pendingLogs")
+		require.Equal(t, uint(0), tr.logIndex, "logIndex advances only at flush time")
+	})
+
+	t.Run("EmitTransferLog when txStarted=false is a no-op", func(t *testing.T) {
+		// The cleanup closure's failure branch calls DiscardPendingLogs and
+		// resets txStarted before any potential EmitTransferLog could fire,
+		// but guard defensively in case a future caller violates the contract.
+		tr := newIotexRPCTracer(1)
+		tr.txStarted = false
+
+		tr.EmitTransferLog(&types.Log{Address: common.HexToAddress("0xdead")})
+		require.Empty(t, tr.pendingLogs, "outside an active tx, synthetic logs must be dropped")
+	})
+
+	t.Run("EVM logs and synthetic logs land in pendingLogs in canonical order", func(t *testing.T) {
+		// Cleanup closure ordering:
+		//   1. EVM execution -> tr.OnLog for each LOG opcode -> pendingLogs
+		//   2. CaptureEnd
+		//   3. EmitTransferLogs -> tr.EmitTransferLog per synthetic -> pendingLogs
+		//   4. CaptureTxEnd -> flush
+		// canonical-events rebuild iterates r.Logs() (EVM) before
+		// r.TransferLogs() (synthetic) when assigning inTxPos, so the inner
+		// callTracer must see EVM logs first and synthetic logs second.
+		tr := newIotexRPCTracer(1)
+		tr.captureStarted = true
+		tr.txStarted = true
+
+		evm0 := &types.Log{Address: common.HexToAddress("0xa0")}
+		evm1 := &types.Log{Address: common.HexToAddress("0xa1")}
+		tr.OnLog(evm0)
+		tr.OnLog(evm1)
+
+		tr.captureStarted = false // simulate post-CaptureEnd
+		syn0 := &types.Log{Address: common.HexToAddress("0xb0")}
+		syn1 := &types.Log{Address: common.HexToAddress("0xb1")}
+		tr.EmitTransferLog(syn0)
+		tr.EmitTransferLog(syn1)
+
+		require.Len(t, tr.pendingLogs, 4)
+		require.Same(t, evm0, tr.pendingLogs[0], "EVM log #0 must come first")
+		require.Same(t, evm1, tr.pendingLogs[1], "EVM log #1 must come second")
+		require.Same(t, syn0, tr.pendingLogs[2], "synthetic #0 must come after EVM logs")
+		require.Same(t, syn1, tr.pendingLogs[3], "synthetic #1 must come last")
 	})
 
 	t.Run("Discard then next action's logs index from 0", func(t *testing.T) {
