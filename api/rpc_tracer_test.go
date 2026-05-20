@@ -295,11 +295,20 @@ func TestIotexRPCTracerStackAndSnapshot(t *testing.T) {
 			"position = root.childCount(1) + root.logCount-before(1) = 2")
 	})
 
-	t.Run("CaptureExit guards against underflow on stack", func(t *testing.T) {
+	t.Run("CaptureExit on root panics (invariant: must have sub-frame)", func(t *testing.T) {
 		tr := openTracer()
-		// only root in stack → CaptureExit should NOT pop root (stack len would go to 0)
-		tr.CaptureExit(nil, 0, nil)
-		require.Len(t, tr.stack, 1, "CaptureExit must not pop root")
+		// only root in stack → CaptureExit is an upstream lifecycle violation
+		require.Panics(t, func() {
+			tr.CaptureExit(nil, 0, nil)
+		}, "CaptureExit with no sub-frame must panic, not silently no-op")
+	})
+
+	t.Run("CaptureEnter on empty stack panics (invariant: CaptureStart must precede)", func(t *testing.T) {
+		tr := newIotexRPCTracer(1)
+		// no CaptureStart fired → stack is empty
+		require.Panics(t, func() {
+			tr.CaptureEnter(vm.CALL, common.Address{}, common.Address{}, nil, 0, big.NewInt(0))
+		}, "CaptureEnter before CaptureStart must panic")
 	})
 
 	// IN_CONTRACT_TRANSFER markers (emitted by MakeTransfer for every EVM

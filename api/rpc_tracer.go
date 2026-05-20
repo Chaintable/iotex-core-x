@@ -231,36 +231,49 @@ func (t *iotexRPCTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
 }
 
 func (t *iotexRPCTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
-	if len(t.stack) > 0 {
-		// The new child's index inside parent.Calls equals parent.childCount
-		// BEFORE the increment (CaptureExit will append the finalized frame to
-		// parent.Calls in this exact order). Mirror that here so OnLog's
-		// snapshot path matches inner callTracer's trace_address assignment.
-		parent := &t.stack[len(t.stack)-1]
-		t.path = append(t.path, parent.childCount)
-		parent.childCount++
-		t.stack = append(t.stack, frameCtx{})
+	// Invariant: CaptureStart must have initialized stack=[root] before any
+	// CaptureEnter fires. Empty stack here means upstream EVM lifecycle is
+	// out of sync — silently no-oping would desync our parallel stack from
+	// the inner callTracer (which always pushes), causing wrong frame
+	// attribution downstream. Panic so the violation is loud.
+	if len(t.stack) == 0 {
+		log.L().Panic("[iotexRPCTracer] CaptureEnter with empty stack — CaptureStart did not fire",
+			zap.String("typ", typ.String()),
+			zap.String("from", from.Hex()), zap.String("to", to.Hex()))
 	}
+	// The new child's index inside parent.Calls equals parent.childCount
+	// BEFORE the increment (CaptureExit will append the finalized frame to
+	// parent.Calls in this exact order). Mirror that here so OnLog's
+	// snapshot path matches inner callTracer's trace_address assignment.
+	parent := &t.stack[len(t.stack)-1]
+	t.path = append(t.path, parent.childCount)
+	parent.childCount++
+	t.stack = append(t.stack, frameCtx{})
 	t.inner.CaptureEnter(typ, from, to, input, gas, value)
 }
 
 func (t *iotexRPCTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
-	if len(t.stack) > 1 {
-		t.stack = t.stack[:len(t.stack)-1]
+	// Invariant: CaptureExit only fires on a sub-frame. With root frame
+	// alone (len == 1), pop would underflow. Panic on the violation so an
+	// orphan CaptureExit from upstream EVM lifecycle bugs is caught at the
+	// source rather than producing silently-wrong attribution.
+	if len(t.stack) <= 1 {
+		log.L().Panic("[iotexRPCTracer] CaptureExit with no sub-frame — stack underflow",
+			zap.Int("stackLen", len(t.stack)))
 	}
-	if len(t.path) > 0 {
-		t.path = t.path[:len(t.path)-1]
+	if len(t.path) != len(t.stack)-1 {
+		log.L().Panic("[iotexRPCTracer] CaptureExit invariant: len(path) != len(stack)-1",
+			zap.Int("stackLen", len(t.stack)), zap.Int("pathLen", len(t.path)))
 	}
+	t.stack = t.stack[:len(t.stack)-1]
+	t.path = t.path[:len(t.path)-1]
 	// Inform the inner callTracer how many real EVM logs have been emitted
 	// on the popping frame's parent so far but are still sitting in our
 	// pendingLogs buffer (not yet inserted into parent.Logs). Without this,
 	// callTracer.CaptureExit would compute PosInParentTrace using only
 	// len(parent.Calls) + len(parent.Logs)==0, colliding with the pos values
 	// our snapshotForLog already assigned to those buffered logs.
-	var parentLogCount int64
-	if n := len(t.stack); n > 0 {
-		parentLogCount = t.stack[n-1].logCount
-	}
+	parentLogCount := t.stack[len(t.stack)-1].logCount
 	t.inner.SetPendingLogsOnTopParent(int(parentLogCount))
 	t.inner.CaptureExit(output, gasUsed, err)
 }

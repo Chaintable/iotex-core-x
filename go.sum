@@ -64,6 +64,8 @@ github.com/Chaintable/pipeline v0.0.64-0.20260520140848-79574d4639b8 h1:8Uad9Mxj
 github.com/Chaintable/pipeline v0.0.64-0.20260520140848-79574d4639b8/go.mod h1:B1Y2Hhi3D6g1/I/QsJTZ/dE59zY/H3U3UYKw9qWax0E=
 github.com/Chaintable/pipeline v0.0.64-0.20260520155948-4ea0042b63f3 h1:FyE8xJY895DlYoS5YzOTzwYOVmZ7yfeQQvbfbxAuyGg=
 github.com/Chaintable/pipeline v0.0.64-0.20260520155948-4ea0042b63f3/go.mod h1:B1Y2Hhi3D6g1/I/QsJTZ/dE59zY/H3U3UYKw9qWax0E=
+github.com/Chaintable/pipeline v0.0.64-0.20260520160909-549d8439b179 h1:p4z3qiijy9j+vD+wcOGPv0B8XvPgR6tkpd4UMl3N3cY=
+github.com/Chaintable/pipeline v0.0.64-0.20260520160909-549d8439b179/go.mod h1:B1Y2Hhi3D6g1/I/QsJTZ/dE59zY/H3U3UYKw9qWax0E=
 github.com/CloudyKit/fastprinter v0.0.0-20170127035650-74b38d55f37a/go.mod h1:EFZQ978U7x8IRnstaskI3IysnWY5Ao3QgZUKOXlsAdw=
 github.com/CloudyKit/jet v2.1.3-0.20180809161101-62edd43e4f88+incompatible/go.mod h1:HPYO+50pSWkPoj9Q/eq0aRGByCL6ScRlUmiEX5Zgm+w=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
