@@ -288,6 +288,14 @@ func (t *iotexRPCTracer) snapshotForLog(l *types.Log) pendingLog {
 		position = top.childCount + top.logCount
 		top.logCount++
 	}
+	topic0 := "(none)"
+	if len(l.Topics) > 0 {
+		topic0 = l.Topics[0].Hex()
+	}
+	log.L().Info("[PR9_SNAP]",
+		zap.Int("stack", len(t.stack)), zap.Int64s("path", pathCopy),
+		zap.Int64("pos", position), zap.String("addr", l.Address.Hex()),
+		zap.String("topic0", topic0))
 	return pendingLog{log: l, traceAddress: pathCopy, position: position}
 }
 
@@ -325,6 +333,7 @@ func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
 	if !t.txStarted {
 		return
 	}
+	log.L().Info("[PR9_EMIT]", zap.Int("stack", len(t.stack)), zap.Int64s("path", t.path))
 	// EmitTransferLog runs after CaptureEnd in the cleanup closure; by that
 	// point the parallel stack still has the root frame (CaptureEnd does NOT
 	// pop it) and path is empty, so the synthetic log lands on the root
