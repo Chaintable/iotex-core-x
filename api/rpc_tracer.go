@@ -251,6 +251,17 @@ func (t *iotexRPCTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
 	if len(t.path) > 0 {
 		t.path = t.path[:len(t.path)-1]
 	}
+	// Inform the inner callTracer how many real EVM logs have been emitted
+	// on the popping frame's parent so far but are still sitting in our
+	// pendingLogs buffer (not yet inserted into parent.Logs). Without this,
+	// callTracer.CaptureExit would compute PosInParentTrace using only
+	// len(parent.Calls) + len(parent.Logs)==0, colliding with the pos values
+	// our snapshotForLog already assigned to those buffered logs.
+	var parentLogCount int64
+	if n := len(t.stack); n > 0 {
+		parentLogCount = t.stack[n-1].logCount
+	}
+	t.inner.SetPendingLogsOnTopParent(int(parentLogCount))
 	t.inner.CaptureExit(output, gasUsed, err)
 }
 
