@@ -301,4 +301,99 @@ func TestIotexRPCTracerStackAndSnapshot(t *testing.T) {
 		tr.CaptureExit(nil, 0, nil)
 		require.Len(t, tr.stack, 1, "CaptureExit must not pop root")
 	})
+
+	// IN_CONTRACT_TRANSFER markers (emitted by MakeTransfer for every EVM
+	// sub-call value transfer) are forwarded to OnLog by AddLog but NOT
+	// appended to receipt.Logs(). Including them in pendingLogs misaligns
+	// InTxLogIdx with the receipt-side iteration that canonical-events
+	// rebuild uses, causing wrong frame attribution for all subsequent
+	// real EVM logs. OnLog must drop these markers.
+	t.Run("IN_CONTRACT_TRANSFER markers are dropped from OnLog", func(t *testing.T) {
+		tr := openTracer()
+		enterCall(tr)
+		// MakeTransfer emits a marker on every sub-call with value: topic[0]
+		// = zero hash (encoded TransactionLogType_IN_CONTRACT_TRANSFER == 0).
+		marker := &types.Log{
+			Address: common.Address{},
+			Topics: []common.Hash{
+				{}, // zero hash → IN_CONTRACT_TRANSFER marker
+				common.HexToHash("0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), // from
+				common.HexToHash("0x000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), // to
+			},
+		}
+		tr.OnLog(marker)
+		require.Empty(t, tr.pendingLogs, "marker must be filtered out of pendingLogs")
+
+		// A real ERC20 Transfer event (3 topics but topic[0] is the Transfer
+		// signature, not zero) must still be staged.
+		realTransfer := &types.Log{
+			Address: common.HexToAddress("0xdead"),
+			Topics: []common.Hash{
+				common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+				common.HexToHash("0x000000000000000000000000aaaa"),
+				common.HexToHash("0x000000000000000000000000bbbb"),
+			},
+		}
+		tr.OnLog(realTransfer)
+		require.Len(t, tr.pendingLogs, 1, "real ERC20 Transfer must be staged")
+		require.Same(t, realTransfer, tr.pendingLogs[0].log)
+	})
+
+	// Replays the exact CaptureEnter/CaptureExit/OnLog sequence for real tx
+	// 0xad1f3743... (block 48348286, ground truth from debug_traceBlockByNumber
+	// callTracer/withLog). 5 logs should snapshot trace_address [1], [2], [3],
+	// [3], [3,0,0] respectively.
+	t.Run("realistic CaptureEnter/Exit/OnLog sequence matches gt attribution", func(t *testing.T) {
+		tr := openTracer()
+
+		// sub[0] STATICCALL (no log)
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+
+		// sub[1] CALL with one log
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa00744")})
+		tr.CaptureExit(nil, 0, nil)
+
+		// sub[2] CALL with one log
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xa00744")})
+		tr.CaptureExit(nil, 0, nil)
+
+		// sub[3] CALL with two logs + nested sub-calls
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0x6cafc26f")})
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0x6cafc26f")})
+
+		// sub[3,0] CALL → sub[3,0,0] DELEGATECALL with one log
+		enterCall(tr)
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xbfe6dfa7")})
+		tr.CaptureExit(nil, 0, nil)
+		tr.CaptureExit(nil, 0, nil)
+
+		// sub[3,1] STATICCALL (no log)
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+
+		// sub[3,2] STATICCALL → sub[3,2,0] DELEGATECALL (no log)
+		enterCall(tr)
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+		tr.CaptureExit(nil, 0, nil)
+
+		// sub[3,3] STATICCALL (no log)
+		enterCall(tr)
+		tr.CaptureExit(nil, 0, nil)
+
+		tr.CaptureExit(nil, 0, nil) // exit sub[3]
+		tr.CaptureEnd(nil, 0, nil)
+
+		require.Len(t, tr.pendingLogs, 5)
+		require.Equal(t, []int64{1}, tr.pendingLogs[0].traceAddress, "log #1 must be at [1]")
+		require.Equal(t, []int64{2}, tr.pendingLogs[1].traceAddress, "log #2 must be at [2]")
+		require.Equal(t, []int64{3}, tr.pendingLogs[2].traceAddress, "log #3 must be at [3]")
+		require.Equal(t, []int64{3}, tr.pendingLogs[3].traceAddress, "log #4 must be at [3]")
+		require.Equal(t, []int64{3, 0, 0}, tr.pendingLogs[4].traceAddress, "log #5 must be at [3,0,0]")
+	})
 }

@@ -267,11 +267,23 @@ func (t *iotexRPCTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64,
 // to inner.InsertLog + logIndex assignment happens in CaptureTxEnd's flush
 // (success path) or is dropped by DiscardPendingLogs (Simulate-skip path).
 //
-// Guard against !captureStarted — IoTeX's MakeTransfer emits logs before
-// CaptureStart; those logs have no frame to attach to and are intentionally
-// dropped (matches pre-existing behavior).
+// Guards:
+//   - !captureStarted: MakeTransfer can emit logs before CaptureStart; those
+//     logs have no frame to attach to and are intentionally dropped (matches
+//     pre-existing behavior).
+//   - IN_CONTRACT_TRANSFER markers: see isInContractTransferMarker. AddLog
+//     forwards them to OnLog but never appends them to stateDB.logs, so
+//     including them in pendingLogs would offset InTxLogIdx away from the
+//     receipt-side iteration order that canonical_events rebuild uses to
+//     bind logs back to their originating frame. The markers ARE captured
+//     by stateDB.addTransactionLogs and replayed via EmitTransferLog in
+//     the cleanup closure, so attribution still surfaces — just on the
+//     synthetic-transfer side where the iteration order naturally matches.
 func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	if !t.captureStarted {
+		return
+	}
+	if isInContractTransferMarker(l) {
 		return
 	}
 	t.pendingLogs = append(t.pendingLogs, t.snapshotForLog(l))
@@ -288,15 +300,33 @@ func (t *iotexRPCTracer) snapshotForLog(l *types.Log) pendingLog {
 		position = top.childCount + top.logCount
 		top.logCount++
 	}
-	topic0 := "(none)"
-	if len(l.Topics) > 0 {
-		topic0 = l.Topics[0].Hex()
-	}
-	log.L().Info("[PR9_SNAP]",
-		zap.Int("stack", len(t.stack)), zap.Int64s("path", pathCopy),
-		zap.Int64("pos", position), zap.String("addr", l.Address.Hex()),
-		zap.String("topic0", topic0))
 	return pendingLog{log: l, traceAddress: pathCopy, position: position}
+}
+
+// isInContractTransferMarker returns true if l is an IN_CONTRACT_TRANSFER
+// marker emitted by iotex's MakeTransfer (action/protocol/execution/evm/
+// evm.go:67-79) — fired automatically for every EVM sub-call value transfer.
+//
+// The marker is recognised by topic[0] == zero hash, which is the encoded
+// value of TransactionLogType_IN_CONTRACT_TRANSFER (= 0) wrapped through
+// hash.BytesToHash256([]byte{0}) and read by evmstatedbadapter.AddLog at
+// line 899 to gate the `return` that prevents appending to stateDB.logs.
+//
+// Why this matters here: AddLog forwards EVERY log (including the marker)
+// to tracer.OnLog BEFORE the marker check, so iotexRPCTracer.OnLog sees
+// markers; but the marker is NOT added to stateDB.logs, so it never
+// surfaces in receipt.Logs(). Including it in pendingLogs would assign it
+// an InTxLogIdx between real EVM logs and misalign the
+// receipt-side `inTxPos` iteration in canonical_events rebuild, breaking
+// frame attribution for every EVM log after the first marker.
+//
+// The marker IS captured separately by stateDB.addTransactionLogs (also at
+// line 906) and replayed later via emitTransferLogsAsEvents →
+// EmitTransferLog in the cleanup closure, so dropping it from OnLog does
+// not lose information; it just keeps the OnLog InTxLogIdx stream aligned
+// with the receipt-side log iteration.
+func isInContractTransferMarker(l *types.Log) bool {
+	return len(l.Topics) == 3 && l.Topics[0] == (common.Hash{})
 }
 
 // EmitTransferLog stages a log converted from a native TransactionLog
@@ -333,7 +363,6 @@ func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
 	if !t.txStarted {
 		return
 	}
-	log.L().Info("[PR9_EMIT]", zap.Int("stack", len(t.stack)), zap.Int64s("path", t.path))
 	// EmitTransferLog runs after CaptureEnd in the cleanup closure; by that
 	// point the parallel stack still has the root frame (CaptureEnd does NOT
 	// pop it) and path is empty, so the synthetic log lands on the root
