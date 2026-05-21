@@ -241,7 +241,25 @@ func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt
 		return
 	}
 	if includeEVMLogs {
-		for _, l := range receipt.Logs() {
+		// receipt.Logs() layout for non-Execution actions whose handler can also
+		// internally invoke EVM (e.g. MigrateStake → createNFTBucket):
+		//   [0 .. handlerLogCount-1] = handler-native actLogs (the handler wrote
+		//                              these directly to the receipt; OnLog
+		//                              never fired for them)
+		//   [handlerLogCount .. end] = inner EVM logs (already buffered via
+		//                              OnLog → pendingLogs during EVM execution)
+		// rpcTracer.onLogCount tracks exactly the second slice's length, so
+		// the head we still need to re-emit is everything before it. Slicing
+		// avoids the pre-fix double-buffer that mis-aligned InTxLogIdx with
+		// receipt iteration order.
+		logs := receipt.Logs()
+		handlerLogCount := len(logs) - rpcTracer.onLogCount
+		if handlerLogCount < 0 {
+			handlerLogCount = 0
+		}
+		head := make([]*types.Log, 0, handlerLogCount)
+		for i := 0; i < handlerLogCount; i++ {
+			l := logs[i]
 			ethLog := &types.Log{
 				Data:        l.Data,
 				BlockNumber: l.BlockHeight,
@@ -254,8 +272,12 @@ func emitTransferLogsAsEvents(rpcTracer *iotexRPCTracer, receipt *action.Receipt
 			for _, topic := range l.Topics {
 				ethLog.Topics = append(ethLog.Topics, common.BytesToHash(topic[:]))
 			}
-			rpcTracer.EmitTransferLog(ethLog)
+			head = append(head, ethLog)
 		}
+		// Prepend the handler-actLog batch as a contiguous block at pendingLogs
+		// head, so the flush order mirrors receipt.Logs() iteration order on
+		// the canonical-events rebuild side.
+		rpcTracer.EmitTransferLogsAtHead(head)
 	}
 	if len(receipt.TransactionLogs()) == 0 {
 		return

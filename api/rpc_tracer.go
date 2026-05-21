@@ -91,6 +91,15 @@ type iotexRPCTracer struct {
 	// with the EVM's actual call depth; OnLog snapshots them.
 	stack []frameCtx
 	path  []int64
+
+	// onLogCount tallies real (non-marker) OnLog snapshots per tx. Used by
+	// emitTransferLogsAsEvents to slice receipt.Logs() into a handler-native
+	// head (= the actLogs the handler wrote directly to receipt) and an
+	// inner-EVM tail (= logs already buffered via OnLog). Without this slice,
+	// the cleanup closure would re-buffer the inner-EVM tail and offset the
+	// (txID, InTxLogIdx) binding used by canonical-events rebuild.
+	// Reset alongside the stack on every CaptureTxStart.
+	onLogCount int
 }
 
 func newIotexRPCTracer(chainID uint32) *iotexRPCTracer {
@@ -134,6 +143,7 @@ func (t *iotexRPCTracer) CaptureTxStart(gasLimit uint64) {
 	// in some pathological scenario). CaptureStart fills root in immediately.
 	t.stack = t.stack[:0]
 	t.path = t.path[:0]
+	t.onLogCount = 0
 	// Bridge: look up pre-computed ethTx by index, call inner.OnTxStart
 	if t.currentIdx < len(t.actions) {
 		selp := t.actions[t.currentIdx]
@@ -310,6 +320,7 @@ func (t *iotexRPCTracer) OnLog(l *types.Log) {
 	if isInContractTransferMarker(l) {
 		return
 	}
+	t.onLogCount++
 	t.pendingLogs = append(t.pendingLogs, t.snapshotForLog(l))
 }
 
@@ -394,4 +405,36 @@ func (t *iotexRPCTracer) EmitTransferLog(l *types.Log) {
 	// the EVM OnLog calls left off, preserving the OnLog vs synthetic order
 	// canonical-events rebuild expects.
 	t.pendingLogs = append(t.pendingLogs, t.snapshotForLog(l))
+}
+
+// EmitTransferLogsAtHead snapshots the given handler-native actLogs (the head
+// of receipt.Logs() that the action handler wrote directly, NOT via
+// stateDB.AddLog → OnLog) and prepends them to pendingLogs as a contiguous
+// block, preserving the input order.
+//
+// Why prepend (not append): canonical_events rebuild iterates receipt.Logs()
+// in receipt order, where actLogs always appear at the HEAD before any inner
+// EVM logs. To keep (txID, InTxLogIdx) ↔ (txID, inTxPos) aligned, our
+// flushPendingLogs order must mirror that: actLogs first, then inner OnLog
+// snapshots, then synthetic TransferLog (TransactionLogs) appended at tail.
+//
+// Background — the bug this fixes: non-Execution EthCompatibleAction handlers
+// that internally invoke evm.ExecuteContract (notably MigrateStake → createNFTBucket)
+// emit both handler-native actLogs AND inner EVM logs that reach receipt.Logs()
+// together. The pre-fix emitTransferLogsAsEvents unconditionally re-emitted
+// ALL receipt.Logs() at cleanup; the inner-EVM tail was therefore double-buffered
+// (once via OnLog during EVM, once via EmitTransferLog at cleanup), inflating
+// pendingLogs length beyond what receipt iteration expects. The shift caused
+// (txID, inTxIdx=K) on the rebuild side to look up the wrong replay-side
+// binding for every K ≥ 0. Slicing the head-only and prepending here keeps
+// alignment.
+func (t *iotexRPCTracer) EmitTransferLogsAtHead(logs []*types.Log) {
+	if !t.txStarted || len(logs) == 0 {
+		return
+	}
+	head := make([]pendingLog, len(logs))
+	for i, l := range logs {
+		head[i] = t.snapshotForLog(l)
+	}
+	t.pendingLogs = append(head, t.pendingLogs...)
 }

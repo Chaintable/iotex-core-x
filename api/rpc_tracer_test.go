@@ -348,6 +348,89 @@ func TestIotexRPCTracerStackAndSnapshot(t *testing.T) {
 		require.Same(t, realTransfer, tr.pendingLogs[0].log)
 	})
 
+	// MigrateStake-style flow (handler emits actLog at root, then internally
+	// runs EVM that emits more logs at sub[0]). The cleanup closure must
+	// prepend the handler actLog so InTxLogIdx aligns with receipt iteration
+	// (which puts actLog at the head of receipt.Logs(), inner-EVM logs after).
+	// Pre-fix bug: emitTransferLogsAsEvents re-emitted the inner-EVM tail too,
+	// double-buffering and shifting binding lookup by N positions.
+	t.Run("MigrateStake-style: handler actLog + inner EVM at sub[0] aligns InTxLogIdx", func(t *testing.T) {
+		tr := openTracer()
+
+		// Simulate inner EVM enter+exit with 2 logs in sub[0]
+		enterCall(tr)
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0x65b0c054"),
+			Topics: []common.Hash{common.HexToHash("0xddf252ad")}}) // inner Transfer
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0x65b0c054"),
+			Topics: []common.Hash{common.HexToHash("0x17700ceb")}}) // inner 0x17700ceb
+		tr.CaptureExit(nil, 0, nil)
+
+		// At this point: 2 real OnLog snapshots, onLogCount=2
+		require.Equal(t, 2, tr.onLogCount)
+		require.Len(t, tr.pendingLogs, 2)
+
+		// Cleanup-closure path: receipt.Logs() = [actLog, Transfer, 0x17700ceb]
+		// (3 total). handlerLogCount = 3 - 2 = 1. Prepend the actLog only.
+		actLog := &types.Log{Address: common.HexToAddress("0x04c22afa"),
+			Topics: []common.Hash{common.HexToHash("0x0000000000000000000000000000000000000077697468647261775374616b65")}} // withdrawStake-style topic
+		tr.EmitTransferLogsAtHead([]*types.Log{actLog})
+
+		require.Len(t, tr.pendingLogs, 3, "head=1 actLog + 2 inner OnLog snapshots")
+		require.Same(t, actLog, tr.pendingLogs[0].log, "actLog must be at HEAD of pendingLogs")
+		require.Empty(t, tr.pendingLogs[0].traceAddress, "actLog goes to root frame")
+		// actLog position = root.childCount(1, from sub[0] enter) + root.logCount(0) = 1
+		require.Equal(t, int64(1), tr.pendingLogs[0].position)
+		// Inner OnLog entries preserve their original (sub[0], pos 0/1) snapshots
+		require.Equal(t, []int64{0}, tr.pendingLogs[1].traceAddress)
+		require.Equal(t, int64(0), tr.pendingLogs[1].position)
+		require.Equal(t, []int64{0}, tr.pendingLogs[2].traceAddress)
+		require.Equal(t, int64(1), tr.pendingLogs[2].position)
+
+		// Synth TransactionLogs would be appended at tail (skipped here for brevity)
+		// pendingLogs[N..] = synth at root with positions N+1..N+M
+	})
+
+	t.Run("EmitTransferLogsAtHead is no-op when txStarted=false", func(t *testing.T) {
+		tr := newIotexRPCTracer(1)
+		tr.EmitTransferLogsAtHead([]*types.Log{
+			{Address: common.HexToAddress("0xdead")},
+		})
+		require.Empty(t, tr.pendingLogs)
+	})
+
+	t.Run("EmitTransferLogsAtHead is no-op for empty input", func(t *testing.T) {
+		tr := openTracer()
+		tr.EmitTransferLogsAtHead(nil)
+		tr.EmitTransferLogsAtHead([]*types.Log{})
+		require.Empty(t, tr.pendingLogs)
+	})
+
+	t.Run("onLogCount counts real OnLog only, not markers", func(t *testing.T) {
+		tr := openTracer()
+		// Real log
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xaa"),
+			Topics: []common.Hash{common.HexToHash("0xdeadbeef")}})
+		require.Equal(t, 1, tr.onLogCount)
+		// Marker (3 topics, topic[0] = zero hash) — filtered, onLogCount unchanged
+		tr.OnLog(&types.Log{
+			Topics: []common.Hash{{}, common.HexToHash("0xaa"), common.HexToHash("0xbb")},
+		})
+		require.Equal(t, 1, tr.onLogCount)
+		// Another real log
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xbb")})
+		require.Equal(t, 2, tr.onLogCount)
+	})
+
+	t.Run("onLogCount resets on CaptureTxStart", func(t *testing.T) {
+		tr := openTracer()
+		tr.OnLog(&types.Log{Address: common.HexToAddress("0xaa")})
+		require.Equal(t, 1, tr.onLogCount)
+		// Simulate next tx — pretend CaptureTxEnd cleared txStarted
+		tr.txStarted = false
+		tr.CaptureTxStart(0)
+		require.Equal(t, 0, tr.onLogCount, "onLogCount must reset for next tx")
+	})
+
 	// Replays the exact CaptureEnter/CaptureExit/OnLog sequence for real tx
 	// 0xad1f3743... (block 48348286, ground truth from debug_traceBlockByNumber
 	// callTracer/withLog). 5 logs should snapshot trace_address [1], [2], [3],
