@@ -4,6 +4,7 @@ import (
 	"math/big"
 
 	erigonComm "github.com/erigontech/erigon-lib/common"
+	erigonAcc "github.com/erigontech/erigon/core/types/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
@@ -103,10 +104,12 @@ func (as *accountStorage) Load(key []byte, obj any) error {
 	default:
 		return errors.Errorf("unknown account type %v for address %x", pbAcc.Type, addr.Bytes())
 	}
-	// if ch := as.backend.intraBlockState.GetCodeHash(addr); !accounts.IsEmptyCodeHash(ch) {
-	// 	pbAcc.CodeHash = ch.Bytes()
-	// }
-	pbAcc.CodeHash = as.backend.intraBlockState.GetCodeHash(addr).Bytes()
+	// Only set CodeHash for actual contracts. Erigon returns emptyCodeHash
+	// (keccak256("")) for EOAs — setting it unconditionally makes IsContract()
+	// return true for all EOAs, breaking native-transfer handling in replay path.
+	if ch := as.backend.intraBlockState.GetCodeHash(addr); !erigonAcc.IsEmptyCodeHash(ch) {
+		pbAcc.CodeHash = ch.Bytes()
+	}
 	acct.FromProto(pbAcc)
 	return nil
 }

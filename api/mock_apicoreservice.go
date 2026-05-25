@@ -15,6 +15,7 @@ import (
 	reflect "reflect"
 	time "time"
 
+	types "github.com/Chaintable/pipeline/types"
 	tracers "github.com/ethereum/go-ethereum/eth/tracers"
 	hash "github.com/iotexproject/go-pkgs/hash"
 	address "github.com/iotexproject/iotex-address/address"
@@ -293,6 +294,36 @@ func (m *MockCoreService) CodeAt(ctx context.Context, addr address.Address, heig
 func (mr *MockCoreServiceMockRecorder) CodeAt(ctx, addr, height any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CodeAt", reflect.TypeOf((*MockCoreService)(nil).CodeAt), ctx, addr, height)
+}
+
+// DebankBlock mocks base method.
+func (m *MockCoreService) DebankBlock(ctx context.Context, height uint64) (*types.DebankOutPut, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DebankBlock", ctx, height)
+	ret0, _ := ret[0].(*types.DebankOutPut)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// DebankBlock indicates an expected call of DebankBlock.
+func (mr *MockCoreServiceMockRecorder) DebankBlock(ctx, height any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DebankBlock", reflect.TypeOf((*MockCoreService)(nil).DebankBlock), ctx, height)
+}
+
+// DebankBlockWithDebug mocks base method.
+func (m *MockCoreService) DebankBlockWithDebug(ctx context.Context, height uint64) (*types.DebankOutPut, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DebankBlockWithDebug", ctx, height)
+	ret0, _ := ret[0].(*types.DebankOutPut)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// DebankBlockWithDebug indicates an expected call of DebankBlockWithDebug.
+func (mr *MockCoreServiceMockRecorder) DebankBlockWithDebug(ctx, height any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DebankBlockWithDebug", reflect.TypeOf((*MockCoreService)(nil).DebankBlockWithDebug), ctx, height)
 }
 
 // EVMNetworkID mocks base method.
@@ -707,6 +738,22 @@ func (m *MockCoreService) SimulateExecution(arg0 context.Context, arg1 address.A
 func (mr *MockCoreServiceMockRecorder) SimulateExecution(arg0, arg1, arg2 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SimulateExecution", reflect.TypeOf((*MockCoreService)(nil).SimulateExecution), arg0, arg1, arg2)
+}
+
+// SimulateExecutionBatch mocks base method.
+func (m *MockCoreService) SimulateExecutionBatch(ctx context.Context, height uint64, archive bool, args []SimulateBatchArg) ([]SimulateBatchResult, SimulateBatchInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SimulateExecutionBatch", ctx, height, archive, args)
+	ret0, _ := ret[0].([]SimulateBatchResult)
+	ret1, _ := ret[1].(SimulateBatchInfo)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// SimulateExecutionBatch indicates an expected call of SimulateExecutionBatch.
+func (mr *MockCoreServiceMockRecorder) SimulateExecutionBatch(ctx, height, archive, args any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SimulateExecutionBatch", reflect.TypeOf((*MockCoreService)(nil).SimulateExecutionBatch), ctx, height, archive, args)
 }
 
 // Start mocks base method.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/iotexproject/iotex-address/address"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -176,4 +177,25 @@ func TestParseBlockNumber(t *testing.T) {
 		num, _ := web3svr.parseBlockNumber("")
 		require.Equal(num, uint64(0x1))
 	})
+}
+
+// TestBlockNumberOrHashToHeight_EmptyDoesNotPanic locks in the defensive
+// branch that turns an empty BlockNumberOrHash (both BlockNumber and BlockHash
+// nil) into latest-block semantics rather than `*bn.BlockNumber` UB.
+//
+// The original panic was reachable from estimateGasDebank: parseCallObject's
+// params.1 path called rpc.BlockNumberOrHash.UnmarshalJSON on debank's
+// `{block_id, type}` object, which silently overwrote the default
+// LatestBlockNumber with both fields nil. estimateGasDebank now resolves the
+// debank block context up front (see web3server_debank.go), so this guard is
+// defense in depth — but a future caller mis-constructing the struct must not
+// take the writer down.
+func TestBlockNumberOrHashToHeight_EmptyDoesNotPanic(t *testing.T) {
+	require := require.New(t)
+	web3svr := &web3Handler{nil, nil, _defaultBatchRequestLimit}
+
+	height, archive, err := web3svr.blockNumberOrHashToHeight(rpc.BlockNumberOrHash{})
+	require.NoError(err)
+	require.Equal(uint64(0), height)
+	require.False(archive)
 }

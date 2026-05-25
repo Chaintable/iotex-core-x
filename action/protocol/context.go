@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/iotexproject/go-pkgs/hash"
 	"github.com/iotexproject/iotex-address/address"
@@ -40,6 +42,7 @@ type (
 		Height        uint64
 		GasUsed       uint64
 		Hash          hash.Hash256
+		StateDigest   hash.Hash256
 		Timestamp     time.Time
 		BaseFee       *big.Int
 		BlobGasUsed   uint64
@@ -420,4 +423,139 @@ func WithVMConfigCtx(ctx context.Context, vmConfig vm.Config) context.Context {
 func GetVMConfigCtx(ctx context.Context) (vm.Config, bool) {
 	cfg, ok := ctx.Value(vmConfigContextKey{}).(vm.Config)
 	return cfg, ok
+}
+
+type pipelineHooksContextKey struct{}
+
+// WithPipelineHooksCtx adds pipeline tracing hooks to context
+func WithPipelineHooksCtx(ctx context.Context, hooks *tracing.Hooks) context.Context {
+	return context.WithValue(ctx, pipelineHooksContextKey{}, hooks)
+}
+
+// GetPipelineHooksCtx returns the pipeline hooks from context, nil if not set
+func GetPipelineHooksCtx(ctx context.Context) *tracing.Hooks {
+	hooks, _ := ctx.Value(pipelineHooksContextKey{}).(*tracing.Hooks)
+	return hooks
+}
+
+type pipelineEVMLoggerContextKey struct{}
+
+// WithPipelineEVMLoggerCtx adds pipeline EVM logger to context (separate from VMConfigCtx to avoid triggering TraceStart/TraceEnd)
+func WithPipelineEVMLoggerCtx(ctx context.Context, logger vm.EVMLogger) context.Context {
+	return context.WithValue(ctx, pipelineEVMLoggerContextKey{}, logger)
+}
+
+// GetPipelineEVMLoggerCtx returns the pipeline EVM logger from context, nil if not set
+func GetPipelineEVMLoggerCtx(ctx context.Context) vm.EVMLogger {
+	logger, _ := ctx.Value(pipelineEVMLoggerContextKey{}).(vm.EVMLogger)
+	return logger
+}
+
+// PipelineStateDiffCollector accumulates state diffs across transactions within a block
+type PipelineStateDiffCollector struct {
+	Destructs map[common.Hash]struct{}
+	Accounts  map[common.Hash][]byte
+	Storages  map[common.Hash]map[common.Hash][]byte
+	Codes     map[common.Hash][]byte
+	// Debug enables trace_debankBlock debug logging for sender-balance bug investigation.
+	// Emits [DEBANK_DBG] log lines at every sm.PutState(Account) and at the CommitContracts
+	// EOA overwrite path.
+	Debug bool
+
+	// snapshots is a stack of map copies used for per-action transaction semantics
+	// in Simulate mode. Snapshot before running an action; Revert on failure so the
+	// collector does not retain "ghost" writes from actions that were skipped.
+	snapshots []collectorSnapshot
+}
+
+// collectorSnapshot is a deep copy of the four diff maps at a point in time.
+type collectorSnapshot struct {
+	destructs map[common.Hash]struct{}
+	accounts  map[common.Hash][]byte
+	storages  map[common.Hash]map[common.Hash][]byte
+	codes     map[common.Hash][]byte
+}
+
+// NewPipelineStateDiffCollector creates a new collector with initialized maps
+func NewPipelineStateDiffCollector() *PipelineStateDiffCollector {
+	return &PipelineStateDiffCollector{
+		Destructs: make(map[common.Hash]struct{}),
+		Accounts:  make(map[common.Hash][]byte),
+		Storages:  make(map[common.Hash]map[common.Hash][]byte),
+		Codes:     make(map[common.Hash][]byte),
+	}
+}
+
+// Snapshot deep-copies the four diff maps and pushes the copy onto a stack.
+// Returns an id (stack depth) to pass back to Revert.
+// Values in Accounts/Codes are []byte produced fresh per write (RLP encode),
+// and Storages slot values are fresh byte slices from the EVM statedb, so
+// shallow references are safe to share between the live map and the snapshot.
+func (c *PipelineStateDiffCollector) Snapshot() int {
+	if c == nil {
+		return -1
+	}
+	snap := collectorSnapshot{
+		destructs: make(map[common.Hash]struct{}, len(c.Destructs)),
+		accounts:  make(map[common.Hash][]byte, len(c.Accounts)),
+		storages:  make(map[common.Hash]map[common.Hash][]byte, len(c.Storages)),
+		codes:     make(map[common.Hash][]byte, len(c.Codes)),
+	}
+	for k := range c.Destructs {
+		snap.destructs[k] = struct{}{}
+	}
+	for k, v := range c.Accounts {
+		snap.accounts[k] = v
+	}
+	for k, slots := range c.Storages {
+		clone := make(map[common.Hash][]byte, len(slots))
+		for sk, sv := range slots {
+			clone[sk] = sv
+		}
+		snap.storages[k] = clone
+	}
+	for k, v := range c.Codes {
+		snap.codes[k] = v
+	}
+	c.snapshots = append(c.snapshots, snap)
+	return len(c.snapshots) - 1
+}
+
+// Revert restores the collector maps to the state captured by Snapshot with
+// the given id, and pops any snapshots taken after it. Safe no-op on a nil
+// collector or an id that is out of range (typical when Snapshot was never
+// called because the context had no collector).
+func (c *PipelineStateDiffCollector) Revert(id int) {
+	if c == nil || id < 0 || id >= len(c.snapshots) {
+		return
+	}
+	snap := c.snapshots[id]
+	c.Destructs = snap.destructs
+	c.Accounts = snap.accounts
+	c.Storages = snap.storages
+	c.Codes = snap.codes
+	c.snapshots = c.snapshots[:id]
+}
+
+// DiscardSnapshot pops the snapshot with the given id without reverting the
+// live maps. Used on the success path: the snapshot is no longer needed.
+// Pops snapshots taken after id as well, for symmetry with Revert.
+func (c *PipelineStateDiffCollector) DiscardSnapshot(id int) {
+	if c == nil || id < 0 || id >= len(c.snapshots) {
+		return
+	}
+	c.snapshots = c.snapshots[:id]
+}
+
+type stateDiffCollectorContextKey struct{}
+
+// WithStateDiffCollectorCtx adds a state diff collector to context
+func WithStateDiffCollectorCtx(ctx context.Context, c *PipelineStateDiffCollector) context.Context {
+	return context.WithValue(ctx, stateDiffCollectorContextKey{}, c)
+}
+
+// GetStateDiffCollectorCtx returns the state diff collector from context, nil if not set
+func GetStateDiffCollectorCtx(ctx context.Context) *PipelineStateDiffCollector {
+	c, _ := ctx.Value(stateDiffCollectorContextKey{}).(*PipelineStateDiffCollector)
+	return c
 }

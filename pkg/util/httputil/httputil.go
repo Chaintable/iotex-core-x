@@ -39,6 +39,29 @@ func ReadHeaderTimeout(h time.Duration) ServerOption {
 	}
 }
 
+// ReadTimeout overrides the default request read timeout.
+func ReadTimeout(d time.Duration) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.ReadTimeout = d
+	}
+}
+
+// WriteTimeout overrides the default response write timeout. Useful for
+// endpoints whose handler can legitimately take tens of seconds (e.g.
+// trace_debankBlock on hot blocks with thousands of txs/traces).
+func WriteTimeout(d time.Duration) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.WriteTimeout = d
+	}
+}
+
+// IdleTimeout overrides the default keep-alive idle timeout.
+func IdleTimeout(d time.Duration) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.IdleTimeout = d
+	}
+}
+
 // NewServer creates a HTTP server with time out settings.
 func NewServer(addr string, handler http.Handler, opts ...ServerOption) http.Server {
 	cfg := DefaultServerConfig

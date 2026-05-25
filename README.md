@@ -1,5 +1,5 @@
 # iotex-core 
-
+ 
 Official Golang implementation of the IoTeX protocol, the modular DePIN Layer-1 network.
 
 [![Join the forum](https://img.shields.io/badge/Discuss-IoTeX%20Community-blue)](https://community.iotex.io/c/research-development/protocol)

@@ -1,0 +1,29 @@
+# builder image
+FROM golang:1.24-bookworm as builder
+
+ARG ACCESS_TOKEN
+
+RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"
+
+WORKDIR /iotex-core
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_CFLAGS=-D_LARGEFILE64_SOURCE
+RUN make clean build-all
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/iotex/
+
+COPY --from=builder /iotex-core/bin/server /usr/local/bin/iotex-server
+COPY --from=builder /iotex-core/bin/ioctl /usr/local/bin/ioctl
+
+EXPOSE 14014 4689 8545
+
+ENTRYPOINT ["/usr/local/bin/iotex-server"]

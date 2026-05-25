@@ -188,6 +188,8 @@ func newParams(
 
 	if vmCfg, ok := protocol.GetVMConfigCtx(ctx); ok {
 		vmConfig = vmCfg
+	} else if logger := protocol.GetPipelineEVMLoggerCtx(ctx); logger != nil {
+		vmConfig.Tracer = logger
 	}
 	chainConfig, err := getChainConfig(g.Blockchain, blkCtx.BlockHeight, evmNetworkID, func(height uint64) (*time.Time, error) {
 		return blockHeightToTime(ctx, height)
@@ -309,12 +311,37 @@ func ExecuteContract(
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to split gas")
 		}
+		if c := protocol.GetStateDiffCollectorCtx(ctx); c != nil && c.Debug {
+			var b, p string
+			if baseFee != nil {
+				b = baseFee.String()
+			}
+			if priorityFee != nil {
+				p = priorityFee.String()
+			}
+			log.T(ctx).Sugar().Infof("[DEBANK_DBG] SPLIT_GAS consumedGas=%d baseFeeAmt=%s priorityFeeAmt=%s", consumedGas, b, p)
+		}
 		depositLog, err = ps.helperCtx.DepositGasFunc(ctx, sm, baseFee, protocol.PriorityFeeOption(priorityFee))
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 
+	// capture per-action EVM state diff before CommitContracts/clear wipes tracking data.
+	// Unwrap through ErigonStateDBAdapter/Dryrun wrappers to reach the inner StateDBAdapter.
+	var adapter *StateDBAdapter
+	switch s := stateDB.(type) {
+	case *StateDBAdapter:
+		adapter = s
+	case *ErigonStateDBAdapter:
+		adapter = s.StateDBAdapter
+	case *ErigonStateDBAdapterDryrun:
+		adapter = s.ErigonStateDBAdapter.StateDBAdapter
+	}
+	if t, ok := GetTracerCtx(ctx); ok && t.CaptureStateDiff != nil && adapter != nil {
+		destructs, accts, stors, cds := adapter.StateDiff()
+		t.CaptureStateDiff(destructs, accts, stors, cds)
+	}
 	if err := stateDB.CommitContracts(); err != nil {
 		return nil, nil, errors.Wrap(err, "failed to commit contracts to underlying db")
 	}
@@ -570,11 +597,14 @@ func executeInEVM(ctx context.Context, evmParams *Params, stateDB stateDB) ([]by
 				contractRawAddress = contractAddress.String()
 			}
 		}
-		// ret updates may need hard fork
-		// so we change it only when readonly mode now
-		if evmParams.actionCtx.ReadOnly {
-			ret = createRet
-		}
+		// CREATE return value is the deployed bytecode. receipt.Output is an
+		// in-memory-only field (see action/receipt.go: "not serialized to DB")
+		// not covered by consensus / receipts hash, so propagating it here is
+		// safe and does not require a fork. Without this, trace_debankBlock
+		// reports an empty `output` field on every CREATE trace, contradicting
+		// debug_traceBlockByHash (which observes the deployed bytecode directly
+		// via the EVMLogger interface).
+		ret = createRet
 	} else {
 		stateDB.SetNonce(evmParams.txCtx.Origin, stateDB.GetNonce(evmParams.txCtx.Origin)+1)
 		// process contract

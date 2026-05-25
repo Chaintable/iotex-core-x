@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/iotexproject/iotex-core/v2/action/protocol/execution/evm"
 	"github.com/iotexproject/iotex-core/v2/action/protocol/staking"
 	"github.com/iotexproject/iotex-core/v2/actpool"
+	"github.com/iotexproject/iotex-core/v2/blockchain"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/blockdao"
 	"github.com/iotexproject/iotex-core/v2/blockchain/genesis"
@@ -115,6 +117,15 @@ func SetDiffCallback(f Factory, cb StateDiffCallback) bool {
 	return false
 }
 
+// ErigonDB exposes the underlying ErigonDB for canonical state-diff queries.
+// Returns nil on stateDBs that aren't backed by Erigon (e.g., legacy / in-memory factories).
+//
+// Used by api.coreService to construct canonical state_diff via Erigon's AccountChangeSet
+// / StorageChangeSet / kv.Code rather than replay-derived state.
+func (sdb *stateDB) ErigonDB() *erigonstore.ErigonDB {
+	return sdb.erigonDB
+}
+
 // DisableWorkingSetCacheOption disable workingset cache
 func DisableWorkingSetCacheOption() StateDBOption {
 	return func(sdb *stateDB, cfg *Config) error {
@@ -191,6 +202,17 @@ func (sdb *stateDB) Start(ctx context.Context) error {
 		ctx = protocol.WithFeatureCtx(ctx)
 		if sdb.protocolViews, err = sdb.registry.StartAll(ctx, sdb); err != nil {
 			return err
+		}
+		// Compute GenesisStateRoot if not set (e.g. archive node restored from snapshot).
+		// This replays genesis state creation in a temporary working set to get the digest.
+		// For archive nodes, GenesisStateRoot is not set (createGenesisStates was skipped).
+		// Use genesis config hash as a deterministic non-zero proxy for state root.
+		// This ensures pipeline S3 keys are consistent and non-zero.
+		if blockchain.GenesisStateRoot == (common.Hash{}) {
+			genesisHash := sdb.cfg.Genesis.Hash()
+			blockchain.GenesisStateRoot = common.BytesToHash(genesisHash[:])
+			log.L().Info("Set GenesisStateRoot from genesis config hash (archive node)",
+				zap.String("root", blockchain.GenesisStateRoot.Hex()))
 		}
 	case db.ErrNotExist:
 		sdb.currentChainHeight = 0
@@ -291,10 +313,16 @@ func (sdb *stateDB) newReadOnlyWorkingSet(ctx context.Context, height uint64) (*
 		}
 		ws.store = newErigonWorkingSetStoreForSimulate(e)
 	}
+	// Use sdb (stateDB) for protocol view initialization, not ws.
+	// When erigon is configured, ws.store has been replaced with erigon store.
+	// Protocol views (staking candidates, etc.) need to read from stateDB's
+	// KV store which has the data; erigon's historical changesets may be
+	// incomplete and return empty results for system contract queries.
 	ws.views = protocol.NewLazyViews(func() protocol.Views {
-		views, err := sdb.registry.StartAll(ctx, ws)
+		views, err := sdb.registry.StartAll(ctx, sdb)
 		if err != nil {
-			log.L().Panic("Failed to start all protocols for lazy views", zap.Error(err))
+			log.L().Error("Failed to start all protocols for lazy views", zap.Error(err))
+			return nil
 		}
 		return views
 	})
@@ -364,6 +392,9 @@ func (sdb *stateDB) Register(p protocol.Protocol) error {
 
 func (sdb *stateDB) Validate(ctx context.Context, blk *block.Block) error {
 	ctx = protocol.WithRegistry(ctx, sdb.registry)
+	if protocol.GetStateDiffCollectorCtx(ctx) == nil {
+		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
+	}
 	blkHash := blk.HashBlock()
 	ws, isExist, err := sdb.getFromWorkingSets(ctx, blkHash)
 	if err != nil {
@@ -393,6 +424,9 @@ func (sdb *stateDB) Mint(
 	ap actpool.ActPool,
 	pk crypto.PrivateKey,
 ) (*block.Block, error) {
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnCommit != nil {
+		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
+	}
 	bcCtx := protocol.MustGetBlockchainCtx(ctx)
 	expectedBlockHeight := bcCtx.Tip.Height + 1
 	ctx = protocol.WithRegistry(ctx, sdb.registry)
@@ -474,7 +508,7 @@ func (sdb *stateDB) WorkingSetAtHeight(ctx context.Context, height uint64) (prot
 }
 
 // PutBlock persists all changes in RunActions() into the DB
-func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) error {
+func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) (err error) {
 	sdb.mutex.Lock()
 	timer := sdb.timerFactory.NewTimer("Commit")
 	sdb.mutex.Unlock()
@@ -482,6 +516,19 @@ func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) error {
 	producer := blk.PublicKey().Address()
 	if producer == nil {
 		return errors.New("failed to get address")
+	}
+	hooks := protocol.GetPipelineHooksCtx(ctx)
+	if hooks != nil && hooks.OnBlockStart != nil {
+		gethBlock := blockchain.ConvertToGethBlock(blk, sdb.cfg.Genesis)
+		hooks.OnBlockStart(gethBlock)
+	}
+	if hooks != nil && hooks.OnBlockEnd != nil {
+		defer func() {
+			hooks.OnBlockEnd(err)
+		}()
+	}
+	if hooks != nil && hooks.OnCommit != nil {
+		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
 	}
 	ctx = protocol.WithRegistry(ctx, sdb.registry)
 	ws, isExist, err := sdb.getFromWorkingSets(ctx, blk.HashBlock())
@@ -683,8 +730,18 @@ func (sdb *stateDB) createGenesisStates(ctx context.Context) error {
 		return err
 	}
 
+	// Compute GenesisStateRoot BEFORE ws.Commit() because trieless state DB's
+	// Digest() hashes the pending write queue, which is emptied by Commit().
+	if digest, err := ws.digest(); err == nil {
+		blockchain.GenesisStateRoot = common.BytesToHash(digest[:])
+	}
 	if err := ws.Commit(ctx, 0); err != nil {
 		return err
+	}
+	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnGenesisBlock != nil {
+		gethBlock := blockchain.BuildGenesisGethBlock(sdb.cfg.Genesis)
+		alloc := blockchain.BuildGenesisAlloc(sdb.cfg.Genesis)
+		hooks.OnGenesisBlock(gethBlock, alloc)
 	}
 	sdb.protocolViews = ws.views
 	return nil

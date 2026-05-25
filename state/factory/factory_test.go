@@ -17,6 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -1013,6 +1016,176 @@ func testCommit(factory Factory, t *testing.T) {
 	require.NoError(err)
 
 	require.NoError(factory.PutBlock(ctx, &blk))
+}
+
+func TestCommit_OnCommitUsesTipStateDigestAsOriginRoot(t *testing.T) {
+	require := require.New(t)
+
+	cfg := DefaultConfig
+	cfg.Genesis.InitBalanceMap[identityset.Address(28).String()] = "100"
+	cfg.Genesis.InitBalanceMap[identityset.Address(29).String()] = "200"
+
+	registry := protocol.NewRegistry()
+	acc := account.NewProtocol(rewarding.DepositGas)
+	require.NoError(acc.Register(registry))
+
+	sdb, err := NewStateDB(cfg, db.NewMemKVStore(), SkipBlockValidationStateDBOption(), RegistryStateDBOption(registry))
+	require.NoError(err)
+
+	startCtx := protocol.WithBlockCtx(
+		genesis.WithGenesisContext(context.Background(), cfg.Genesis),
+		protocol.BlockCtx{},
+	)
+	require.NoError(sdb.Start(startCtx))
+	defer func() {
+		require.NoError(sdb.Stop(startCtx))
+	}()
+
+	tipDigest := hash.Hash256b([]byte("tip-state-digest"))
+	prevHash := hash.Hash256b([]byte("prev-hash"))
+	ctx := protocol.WithBlockCtx(context.Background(), protocol.BlockCtx{
+		BlockHeight: 1,
+		Producer:    identityset.Address(27),
+		GasLimit:    testutil.TestGasLimit,
+	})
+	ctx = genesis.WithGenesisContext(protocol.WithBlockchainCtx(ctx, protocol.BlockchainCtx{
+		Tip: protocol.TipInfo{
+			Height:      0,
+			Hash:        prevHash,
+			StateDigest: tipDigest,
+		},
+	}), cfg.Genesis)
+	ctx = protocol.WithFeatureCtx(ctx)
+
+	var (
+		called    bool
+		originArg common.Hash
+		rootArg   common.Hash
+		accounts  map[common.Hash][]byte
+	)
+	ctx = protocol.WithPipelineHooksCtx(ctx, &tracing.Hooks{
+		OnCommit: func(originRoot common.Hash, root common.Hash, _ map[common.Hash]struct{}, newAccounts map[common.Hash][]byte, _ map[common.Address][]byte, _ map[common.Hash]map[common.Hash][]byte, _ map[common.Address]map[common.Hash][]byte, _ map[common.Hash][]byte) {
+			called = true
+			originArg = originRoot
+			rootArg = root
+			accounts = newAccounts
+		},
+	})
+
+	tx := action.NewTransfer(big.NewInt(10), identityset.Address(29).String(), nil)
+	elp := (&action.EnvelopeBuilder{}).SetNonce(1).SetAction(tx).Build()
+	selp, err := action.Sign(elp, identityset.PrivateKey(28))
+	require.NoError(err)
+
+	blk, err := block.NewTestingBuilder().
+		SetHeight(1).
+		SetPrevBlockHash(prevHash).
+		SetTimeStamp(testutil.TimestampNow()).
+		AddActions(selp).
+		SignAndBuild(identityset.PrivateKey(27))
+	require.NoError(err)
+
+	require.NoError(sdb.PutBlock(ctx, &blk))
+	require.True(called, "OnCommit should be called")
+	require.Equal(common.BytesToHash(tipDigest[:]), originArg)
+	require.NotEqual(common.Hash{}, rootArg)
+	require.GreaterOrEqual(len(accounts), 2)
+	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(28).Bytes()))
+	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(29).Bytes()))
+}
+
+func TestCommit_OnCommitAfterValidateCollectsNonEVMStateDiff(t *testing.T) {
+	require := require.New(t)
+
+	cfg := DefaultConfig
+	cfg.Genesis.InitBalanceMap[identityset.Address(28).String()] = "100"
+	cfg.Genesis.InitBalanceMap[identityset.Address(29).String()] = "200"
+
+	registrySrc := protocol.NewRegistry()
+	accSrc := account.NewProtocol(rewarding.DepositGas)
+	require.NoError(accSrc.Register(registrySrc))
+	sdbSrc, err := NewStateDB(cfg, db.NewMemKVStore(), RegistryStateDBOption(registrySrc))
+	require.NoError(err)
+
+	registryDst := protocol.NewRegistry()
+	accDst := account.NewProtocol(rewarding.DepositGas)
+	require.NoError(accDst.Register(registryDst))
+	sdbDst, err := NewStateDB(cfg, db.NewMemKVStore(), SkipBlockValidationStateDBOption(), RegistryStateDBOption(registryDst))
+	require.NoError(err)
+
+	startCtx := protocol.WithBlockCtx(
+		genesis.WithGenesisContext(context.Background(), cfg.Genesis),
+		protocol.BlockCtx{},
+	)
+	require.NoError(sdbSrc.Start(startCtx))
+	require.NoError(sdbDst.Start(startCtx))
+	defer func() {
+		require.NoError(sdbSrc.Stop(startCtx))
+		require.NoError(sdbDst.Stop(startCtx))
+	}()
+
+	tipDigest := hash.Hash256b([]byte("tip-state-digest"))
+	prevHash := hash.Hash256b([]byte("prev-hash"))
+	mintCtx := protocol.WithBlockCtx(context.Background(), protocol.BlockCtx{
+		BlockHeight: 1,
+		Producer:    identityset.Address(27),
+		GasLimit:    testutil.TestGasLimit,
+	})
+	mintCtx = genesis.WithGenesisContext(protocol.WithBlockchainCtx(mintCtx, protocol.BlockchainCtx{
+		Tip: protocol.TipInfo{
+			Height:      0,
+			Hash:        prevHash,
+			StateDigest: tipDigest,
+		},
+	}), cfg.Genesis)
+	mintCtx = protocol.WithFeatureWithHeightCtx(mintCtx)
+	mintCtx = protocol.WithFeatureCtx(mintCtx)
+
+	tx := action.NewTransfer(big.NewInt(10), identityset.Address(29).String(), nil)
+	elp := (&action.EnvelopeBuilder{}).SetNonce(1).SetAction(tx).Build()
+	selp, err := action.Sign(elp, identityset.PrivateKey(28))
+	require.NoError(err)
+	ctrl := gomock.NewController(t)
+	ap := mock_actpool.NewMockActPool(ctrl)
+	ap.EXPECT().PendingActionMap().Return(map[string][]*action.SealedEnvelope{
+		identityset.Address(28).String(): []*action.SealedEnvelope{selp},
+	}).Times(1)
+
+	blk, err := sdbSrc.Mint(mintCtx, ap, identityset.PrivateKey(27))
+	require.NoError(err)
+
+	validateCtx := protocol.WithBlockCtx(context.Background(), protocol.BlockCtx{
+		BlockHeight: 1,
+		Producer:    identityset.Address(27),
+		GasLimit:    testutil.TestGasLimit,
+	})
+	validateCtx = genesis.WithGenesisContext(protocol.WithBlockchainCtx(validateCtx, protocol.BlockchainCtx{
+		Tip: protocol.TipInfo{
+			Height:      0,
+			Hash:        prevHash,
+			StateDigest: tipDigest,
+		},
+	}), cfg.Genesis)
+	validateCtx = protocol.WithFeatureWithHeightCtx(validateCtx)
+	validateCtx = protocol.WithFeatureCtx(validateCtx)
+	require.NoError(sdbDst.Validate(validateCtx, blk))
+
+	var (
+		called   bool
+		accounts map[common.Hash][]byte
+	)
+	commitCtx := protocol.WithPipelineHooksCtx(validateCtx, &tracing.Hooks{
+		OnCommit: func(_ common.Hash, _ common.Hash, _ map[common.Hash]struct{}, newAccounts map[common.Hash][]byte, _ map[common.Address][]byte, _ map[common.Hash]map[common.Hash][]byte, _ map[common.Address]map[common.Hash][]byte, _ map[common.Hash][]byte) {
+			called = true
+			accounts = newAccounts
+		},
+	})
+
+	require.NoError(sdbDst.PutBlock(commitCtx, blk))
+	require.True(called, "OnCommit should be called")
+	require.GreaterOrEqual(len(accounts), 2)
+	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(28).Bytes()))
+	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(29).Bytes()))
 }
 
 func TestSTXPickAndRunActions(t *testing.T) {

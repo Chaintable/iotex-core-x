@@ -7,12 +7,18 @@ package blockchain
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Chaintable/pipeline/tracer"
+	ptypes "github.com/Chaintable/pipeline/types"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/facebookgo/clock"
 	"github.com/iotexproject/go-pkgs/crypto"
 	"github.com/iotexproject/go-pkgs/hash"
@@ -22,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/iotexproject/iotex-core/v2/action/protocol"
+	"github.com/iotexproject/iotex-core/v2/action/protocol/execution/evm"
 	"github.com/iotexproject/iotex-core/v2/blockchain/block"
 	"github.com/iotexproject/iotex-core/v2/blockchain/blockdao"
 	"github.com/iotexproject/iotex-core/v2/blockchain/filedao"
@@ -139,6 +146,9 @@ type (
 		// used by account-based model
 		bbf   BlockMinter
 		pause bool
+
+		logger         *tracing.Hooks
+		pipelineTracer *tracer.PipelineTracer
 	}
 )
 
@@ -229,6 +239,37 @@ func NewBlockchain(cfg Config, g genesis.Genesis, dao blockdao.BlockDAO, bbf Blo
 	chain.lifecycle.Add(chain.dao)
 	chain.lifecycle.Add(chain.pubSubManager)
 
+	if cfg.VMTraceConfig != "" {
+		t, err := tracer.NewPipelineTracer(json.RawMessage(cfg.VMTraceConfig))
+		if err != nil {
+			log.L().Panic("failed to create tracer.", zap.Error(err))
+		}
+		chain.pipelineTracer = t
+		chain.logger = tracing.BuildHooks(t)
+		log.L().Info("pipeline tracer created", zap.String("config", cfg.VMTraceConfig))
+	}
+
+	if chain.logger != nil && chain.logger.OnBlockchainInit != nil {
+		initCtx := genesis.WithGenesisContext(
+			protocol.WithBlockchainCtx(context.Background(), protocol.BlockchainCtx{
+				ChainID:      cfg.ID,
+				EvmNetworkID: cfg.EVMNetworkID,
+				GetBlockTime: chain.getBlockTime,
+			}), g)
+		initCtx = protocol.WithBlockCtx(initCtx, protocol.BlockCtx{BlockHeight: 0, BlockTimeStamp: time.Unix(g.Timestamp, 0)})
+		chainConfig, err := evm.NewChainConfig(initCtx)
+		if err != nil {
+			log.L().Panic("failed to create chain config for pipeline tracer.", zap.Error(err))
+		}
+		// NewChainConfig only sets ChainID after Iceland fork (height 12289321),
+		// but OnBlockchainInit is called with height=0, leaving ChainID nil.
+		// Pipeline tracer uses ChainID.String() for S3 key paths — nil produces "<nil>".
+		if chainConfig.ChainID == nil {
+			chainConfig.ChainID = new(big.Int).SetUint64(uint64(cfg.EVMNetworkID))
+		}
+		chain.logger.OnBlockchainInit(chainConfig)
+	}
+
 	return chain
 }
 
@@ -248,6 +289,10 @@ func (bc *blockchain) ChainAddress() string {
 func (bc *blockchain) Start(ctx context.Context) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	if bc.logger != nil {
+		ctx = protocol.WithPipelineHooksCtx(ctx, bc.logger)
+		ctx = protocol.WithPipelineEVMLoggerCtx(ctx, bc.pipelineTracer)
+	}
 	// pass registry to be used by state factory's initialization
 	ctx = protocol.WithFeatureWithHeightCtx(genesis.WithGenesisContext(
 		protocol.WithBlockchainCtx(
@@ -266,6 +311,9 @@ func (bc *blockchain) Start(ctx context.Context) error {
 func (bc *blockchain) Stop(ctx context.Context) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	if bc.logger != nil && bc.logger.OnClose != nil {
+		bc.logger.OnClose()
+	}
 	return bc.lifecycle.OnStop(ctx)
 }
 
@@ -470,6 +518,10 @@ func (bc *blockchain) MintNewBlock(timestamp time.Time, opts ...MintOption) (*bl
 	log.L().Info("Minting a new block.", zap.Uint64("height", newblockHeight), zap.String("minter", minterAddress.String()))
 	ctx = bc.contextWithBlock(ctx, minterAddress, newblockHeight, timestamp, protocol.CalcBaseFee(genesis.MustExtractGenesisContext(ctx).Blockchain, &tip), protocol.CalcExcessBlobGas(tip.ExcessBlobGas, tip.BlobGasUsed))
 	ctx = protocol.WithFeatureCtx(ctx)
+	if bc.logger != nil {
+		ctx = protocol.WithPipelineHooksCtx(ctx, bc.logger)
+		ctx = protocol.WithPipelineEVMLoggerCtx(ctx, bc.pipelineTracer)
+	}
 	// run execution and update state trie root hash
 	blk, err := bc.bbf.Mint(ctx, producerPrivateKey)
 	if err != nil {
@@ -534,6 +586,7 @@ func (bc *blockchain) tipInfo(tipHeight uint64) (*protocol.TipInfo, error) {
 		Height:        tipHeight,
 		GasUsed:       header.GasUsed(),
 		Hash:          header.HashBlock(),
+		StateDigest:   header.DeltaStateDigest(),
 		Timestamp:     header.Timestamp(),
 		BaseFee:       header.BaseFee(),
 		BlobGasUsed:   header.BlobGasUsed(),
@@ -553,6 +606,10 @@ func (bc *blockchain) commitBlock(blk *block.Block) error {
 	}
 	ctx = bc.contextWithBlock(ctx, blk.PublicKey().Address(), blk.Height(), blk.Timestamp(), blk.BaseFee(), blk.ExcessBlobGas())
 	ctx = protocol.WithFeatureCtx(ctx)
+	if bc.logger != nil {
+		ctx = protocol.WithPipelineHooksCtx(ctx, bc.logger)
+		ctx = protocol.WithPipelineEVMLoggerCtx(ctx, bc.pipelineTracer)
+	}
 	// write block into DB
 	putTimer := bc.timerFactory.NewTimer("putBlock")
 	err = bc.dao.PutBlock(ctx, blk)
@@ -561,7 +618,7 @@ func (bc *blockchain) commitBlock(blk *block.Block) error {
 	case filedao.ErrAlreadyExist, blockdao.ErrAlreadyExist:
 		return nil
 	case nil:
-		// do nothing
+		bc.pushBlockChange(blk)
 	default:
 		return err
 	}
@@ -580,6 +637,133 @@ func (bc *blockchain) commitBlock(blk *block.Block) error {
 	// emit block to all block subscribers
 	bc.emitToSubscribers(blk)
 	return nil
+}
+
+// getCommonAncestor finds the common ancestor between two block contexts and returns
+// the ancestor, the chain from ancestor to blocka (dropBlocks), and the chain from ancestor to blockb (newBlocks).
+// Both the fast path and slow path (reorg walk-back) use IoTeX native hashes consistently:
+// dao.GetBlockHash() returns native hashes, and pushBlockChange now uses native hashes too.
+func (bc *blockchain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptypes.BlockContext) (ptypes.BlockContext, []ptypes.BlockContext, []ptypes.BlockContext) {
+	var chainA, chainB []ptypes.BlockContext
+	if blockb.ParentHash == blocka.Hash {
+		return blocka, chainA, []ptypes.BlockContext{blockb}
+	}
+	for blockb.BlockNumber > blocka.BlockNumber {
+		chainB = append(chainB, blockb)
+		headerb, err := bc.dao.Header(hash.Hash256(blockb.ParentHash))
+		if err != nil {
+			log.L().Fatal("Failed to get header by hash", zap.String("hash", blockb.ParentHash.Hex()), zap.Error(err))
+		}
+		// Use dao.GetBlockHash instead of header.HashBlock() to stay consistent
+		// with IoTeX's hash system where GetBlockHash(0) = GenesisHash() (config hash),
+		// which differs from GenesisBlock().HashBlock() (header protobuf hash).
+		blkHash, err := bc.dao.GetBlockHash(headerb.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headerb.Height()), zap.Error(err))
+		}
+		prevHash := headerb.PrevHash()
+		blockb = ptypes.BlockContext{
+			BlockNumber: headerb.Height(),
+			Hash:        common.Hash(blkHash),
+			ParentHash:  common.Hash(prevHash),
+			Timestamp:   uint64(headerb.Timestamp().Unix()),
+		}
+	}
+	for blocka.Hash != blockb.Hash {
+		chainA = append(chainA, blocka)
+		headera, err := bc.dao.Header(hash.Hash256(blocka.ParentHash))
+		if err != nil {
+			log.L().Fatal("Failed to get header by hash", zap.String("hash", blocka.ParentHash.Hex()), zap.Error(err))
+		}
+		blkHashA, err := bc.dao.GetBlockHash(headera.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headera.Height()), zap.Error(err))
+		}
+		prevHash := headera.PrevHash()
+		blocka = ptypes.BlockContext{
+			BlockNumber: headera.Height(),
+			Hash:        common.Hash(blkHashA),
+			ParentHash:  common.Hash(prevHash),
+			Timestamp:   uint64(headera.Timestamp().Unix()),
+		}
+
+		chainB = append(chainB, blockb)
+		headerb, err := bc.dao.Header(hash.Hash256(blockb.ParentHash))
+		if err != nil {
+			log.L().Fatal("Failed to get header by hash", zap.String("hash", blockb.ParentHash.Hex()), zap.Error(err))
+		}
+		blkHashB, err := bc.dao.GetBlockHash(headerb.Height())
+		if err != nil {
+			log.L().Fatal("Failed to get block hash", zap.Uint64("height", headerb.Height()), zap.Error(err))
+		}
+		prevHash = headerb.PrevHash()
+		blockb = ptypes.BlockContext{
+			BlockNumber: headerb.Height(),
+			Hash:        common.Hash(blkHashB),
+			ParentHash:  common.Hash(prevHash),
+			Timestamp:   uint64(headerb.Timestamp().Unix()),
+		}
+	}
+	slices.Reverse(chainA)
+	slices.Reverse(chainB)
+	return blocka, chainA, chainB
+}
+
+// pushBlockChange pushes block change notification to kafka.
+// Uses IoTeX native hashes (via MixDigest embedded by ConvertToGethBlock) for block
+// identity, matching the official Babel API and writer ETH RPC.
+func (bc *blockchain) pushBlockChange(blk *block.Block) {
+	if tracer.NodeXPusher == nil {
+		return
+	}
+	lastPushed := tracer.NodeXPusher.LastPushedBlock()
+	if lastPushed == nil || lastPushed.BlockNumber > blk.Height() {
+		return
+	}
+	lastCtx := *lastPushed
+	// Native hash extracted from MixDigest by the pipeline tracer in OnBlockStart
+	blkHash := tracer.BlockCtx.BlockHash
+
+	// ParentHash: for sequential blocks use lastCtx.Hash (from Kafka), otherwise
+	// fall back to blk.PrevHash(). Both are now IoTeX native hashes, so they're consistent.
+	var parentHash common.Hash
+	if blk.Height() == lastCtx.BlockNumber+1 {
+		parentHash = lastCtx.Hash
+	} else {
+		log.L().Warn("pushBlockChange: non-sequential block, falling back to native PrevHash",
+			zap.Uint64("blkHeight", blk.Height()),
+			zap.Uint64("lastPushedHeight", lastCtx.BlockNumber))
+		parentHash = common.Hash(blk.PrevHash())
+	}
+
+	_, dropBlocks, newBlocks := bc.getCommonAncestor(lastCtx, ptypes.BlockContext{
+		BlockNumber: blk.Height(),
+		Hash:        blkHash,
+		ParentHash:  parentHash,
+		Timestamp:   uint64(blk.Timestamp().Unix()),
+	})
+	var blockChange *ptypes.BlockChangeNotification
+	if len(dropBlocks) > 0 {
+		log.L().Info("pushBlockChange drop blocks", zap.String("hash", blkHash.Hex()))
+		blockChange = &ptypes.BlockChangeNotification{
+			ChangeType: 2,
+			NewBlocks:  newBlocks,
+			DropBlocks: dropBlocks,
+		}
+	} else if len(newBlocks) > 0 {
+		log.L().Info("pushBlockChange new blocks", zap.String("hash", blkHash.Hex()))
+		blockChange = &ptypes.BlockChangeNotification{
+			ChangeType: 1,
+			NewBlocks:  newBlocks,
+		}
+	}
+	if blockChange != nil {
+		if err := tracer.NodeXPusher.PushBlockChangeNotification(blockChange); err != nil {
+			log.L().Error("PushBlockChangeNotification error", zap.Error(err))
+		} else {
+			log.L().Info("NodeXPusher PushBlockChangeNotification", zap.Uint64("height", blk.Height()))
+		}
+	}
 }
 
 func (bc *blockchain) emitToSubscribers(blk *block.Block) {
