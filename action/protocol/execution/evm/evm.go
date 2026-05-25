@@ -271,13 +271,10 @@ func ExecuteContract(
 			}
 		}
 	}
-	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM START height=%d ts=%s baseFee=%v gasLimit=%d simulate=%v readOnly=%v",
-		ps.blkCtx.BlockHeight, ps.blkCtx.BlockTimeStamp, ps.blkCtx.BaseFee, ps.blkCtx.GasLimit, ps.blkCtx.Simulate, ps.actionCtx.ReadOnly)
 	retval, depositGas, remainingGas, contractAddress, statusCode, err := executeInEVM(ctx, ps, stateDB)
 	if err != nil {
 		return nil, nil, err
 	}
-	log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM done status=%d remainingGas=%d contract=%v", statusCode, remainingGas, contractAddress)
 	receipt := &action.Receipt{
 		GasConsumed:       ps.gas - remainingGas,
 		BlockHeight:       ps.blkCtx.BlockHeight,
@@ -600,18 +597,20 @@ func executeInEVM(ctx context.Context, evmParams *Params, stateDB stateDB) ([]by
 				contractRawAddress = contractAddress.String()
 			}
 		}
-		// ret updates may need hard fork
-		// so we change it only when readonly mode now
-		if evmParams.actionCtx.ReadOnly {
-			ret = createRet
-		}
+		// CREATE return value is the deployed bytecode. receipt.Output is an
+		// in-memory-only field (see action/receipt.go: "not serialized to DB")
+		// not covered by consensus / receipts hash, so propagating it here is
+		// safe and does not require a fork. Without this, trace_debankBlock
+		// reports an empty `output` field on every CREATE trace, contradicting
+		// debug_traceBlockByHash (which observes the deployed bytecode directly
+		// via the EVMLogger interface).
+		ret = createRet
 	} else {
 		stateDB.SetNonce(evmParams.txCtx.Origin, stateDB.GetNonce(evmParams.txCtx.Origin)+1)
 		// process contract
 		ret, remainingGas, evmErr = evm.Call(executor, *evmParams.contract, evmParams.data, remainingGas, amount)
 	}
 	if evmErr != nil {
-		log.S().Infof("[DEBANK_DBG_CREATE] executeInEVM evmErr=%v retLen=%d retHex=%x", evmErr, len(ret), ret)
 		log.T(ctx).Debug("evm error", zap.Error(evmErr))
 		// The only possible consensus-error would be if there wasn't
 		// sufficient balance to make the transfer happen.

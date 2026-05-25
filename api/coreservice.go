@@ -2572,7 +2572,23 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 	}
 
 	// set up tracer context
-	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer})
+	// Wrap rpcTracer with NewTracerWrapper so the EVMLogger interface translates
+	// nested re-entries into CaptureEnter calls instead of stacking CaptureStart
+	// frames. Without this, iotex actions whose handler internally invokes
+	// ExecuteContract (e.g. MigrateStake's stake0 sub-call) trigger two
+	// CaptureStart events on the same tx — one from evm/tracer.go:122-125 (the
+	// non-Execution branch) and one from go-ethereum's EVM.Call at depth 0 —
+	// leaving the pipeline callstack at length 2, so callTracer.OnTxEnd's
+	// `len(callstack) == 1` guard skips trace emission and the entire trace
+	// tree (plus its attributed events) is dropped.
+	//
+	// debug_traceBlockByHash uses the same wrapper at web3server_utils.go,
+	// which is why its callTracer output remains correct on these txs.
+	//
+	// We keep `rpcTracer` (the unwrapped reference) for direct calls below
+	// (OnLog, OnTxEnd, currentIdx, EmitTransferLog, DiscardPendingLogs) —
+	// those bypass the EVMLogger path and need the wrapper-less object.
+	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: evm.NewTracerWrapper(rpcTracer)})
 	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
 		CaptureTx: func(retval []byte, receipt *action.Receipt) {
 			idx := rpcTracer.currentIdx
@@ -2704,7 +2720,22 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 			txIDs[i] = "0x" + hex.EncodeToString(h[:])
 		}
 	}
-	canonicalEvents := buildCanonicalEvents(receipts, txIDs)
+	// Build trace-binding maps from replay output before we overwrite events:
+	// 1) (txID, in_tx_log_idx) -> precise frame binding (callTracer's
+	//    pre-computed ParentTraceID/Position/ID per replay event). The key is
+	//    (txID, in-tx ordinal) rather than the global LogIndex because iotex's
+	//    receipt-side `r.Logs()[i].Index` and callTracer's flush-side counter
+	//    can disagree when interleaved emission allocates non-contiguous
+	//    Indices to the same tx's logs.
+	// 2) tx_id -> root trace id, for fallback when a log has no precise
+	//    (txID, inTxIdx) entry (synthetic TransactionLog with no paired
+	//    callTracer event, or replay-side drift).
+	bindingByTxPos := extractBindingByTxPos(
+		out.BlockFile.Events, out.BlockFile.ErrorEvents,
+		out.BlockFile.Traces, out.BlockFile.ErrorTraces,
+	)
+	rootTraceByTx := extractRootTraceByTx(out.BlockFile.Traces, out.BlockFile.ErrorTraces)
+	canonicalEvents, canonicalErrEvents := buildCanonicalEvents(receipts, txIDs, bindingByTxPos, rootTraceByTx, height)
 
 	// Replay-vs-canonical status comparison: produces per-tx metric and log noise.
 	// Status divergence is information; the actual override + trace-strip happens
@@ -2730,8 +2761,11 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 		}
 	}
 
-	// Override replay-derived fields with canonical ones.
+	// Override replay-derived fields with canonical ones. Both Events and
+	// ErrorEvents are replaced — callTracer's ErrorEvents bucket (logs from
+	// reverted frames) would otherwise duplicate canonicalErrEvents.
 	out.BlockFile.Events = canonicalEvents
+	out.BlockFile.ErrorEvents = canonicalErrEvents
 	out.BlockFile.StorageContracts = storageContracts
 
 	// Build receipt-by-tx-ID lookup. Indexing receipts and BlockFile.Txs by parallel

@@ -16,7 +16,8 @@ import (
 
 type tracerWrapper struct {
 	vm.EVMLogger
-	depth int
+	depth   int // CaptureStart/CaptureEnd nesting depth
+	txDepth int // CaptureTxStart/CaptureTxEnd nesting depth
 }
 
 // NewTracerWrapper wraps the EVMLogger
@@ -47,6 +48,45 @@ func (tw *tracerWrapper) CaptureEnd(output []byte, gasUsed uint64, err error) {
 		return
 	}
 	tw.EVMLogger.CaptureEnd(output, gasUsed, err)
+}
+
+// CaptureTxStart / CaptureTxEnd: track tx-level nesting via txDepth, symmetric
+// to depth for CaptureStart/CaptureEnd.
+//
+// Why: certain iotex action handlers (e.g. MigrateStake's createNFTBucket)
+// internally invoke evm.ExecuteContract while their outer eth-compatible
+// trace frame is still open. ExecuteContract → executeInEVM runs the pair
+//
+//	evm.Config.Tracer.CaptureTxStart(remainingGas)
+//	defer evm.Config.Tracer.CaptureTxEnd(remainingGas)
+//
+// Without depth tracking, the inner defer fires `iotexRPCTracer.CaptureTxEnd`
+// while the outer is still pending — flushing pendingLogs prematurely,
+// clearing `txStarted`, advancing `currentIdx`, and effectively closing the
+// outer tx. The outer cleanup-closure's CaptureTxEnd then short-circuits
+// (`if !txStarted return`), so any logs the outer handler emits AFTER the
+// inner defer (typically when the staking protocol appends to receipt) are
+// orphaned in pendingLogs and leak into the next action's flush.
+//
+// With txDepth, only the outermost CaptureTxStart / CaptureTxEnd pair
+// reaches the inner tracer; nested pairs are no-ops.
+func (tw *tracerWrapper) CaptureTxStart(gasLimit uint64) {
+	tw.txDepth++
+	if tw.txDepth > 1 {
+		return
+	}
+	tw.EVMLogger.CaptureTxStart(gasLimit)
+}
+
+func (tw *tracerWrapper) CaptureTxEnd(restGas uint64) {
+	if tw.txDepth < 1 {
+		return
+	}
+	defer func() { tw.txDepth-- }()
+	if tw.txDepth > 1 {
+		return
+	}
+	tw.EVMLogger.CaptureTxEnd(restGas)
 }
 
 func (tw *tracerWrapper) Unwrap() vm.EVMLogger {
