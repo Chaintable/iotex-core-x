@@ -7,6 +7,7 @@ package dispatcher
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -189,9 +190,7 @@ func (d *IotxDispatcher) EventAudit() map[iotexrpc.MessageType]int {
 	d.eventAuditLock.RLock()
 	defer d.eventAuditLock.RUnlock()
 	snapshot := make(map[iotexrpc.MessageType]int)
-	for k, v := range d.eventAudit {
-		snapshot[k] = v
-	}
+	maps.Copy(snapshot, d.eventAudit)
 	return snapshot
 }
 
@@ -337,6 +336,11 @@ func (d *IotxDispatcher) dispatchMsg(message *message) {
 	case *iotextypes.ConsensusMessage:
 		if err := subscriber.HandleConsensusMsg(msg); err != nil {
 			log.L().Warn("Failed to handle consensus message.", zap.Error(err))
+		}
+	case *iotextypes.Bundle:
+		if err := subscriber.HandleBundle(message.ctx, msg); err != nil {
+			requestMtc.WithLabelValues("AddBundle", "false").Inc()
+			log.L().Warn("Failed to handle bundle message.", zap.Error(err))
 		}
 	case *iotextypes.Action:
 		if err := subscriber.HandleAction(message.ctx, msg); err != nil {

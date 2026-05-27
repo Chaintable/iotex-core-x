@@ -4,7 +4,6 @@ import (
 	"math/big"
 
 	erigonComm "github.com/erigontech/erigon-lib/common"
-	erigonAcc "github.com/erigontech/erigon/core/types/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
@@ -96,20 +95,15 @@ func (as *accountStorage) Load(key []byte, obj any) error {
 	case accountpb.AccountType_ZERO_NONCE:
 		pbAcc.Nonce = nonce
 	case accountpb.AccountType_DEFAULT:
-		if nonce == 0 {
-			pbAcc.Nonce = nonce
-		} else {
+		if nonce > 0 {
 			pbAcc.Nonce = nonce - 1
+		} else {
+			pbAcc.Nonce = 0
 		}
 	default:
 		return errors.Errorf("unknown account type %v for address %x", pbAcc.Type, addr.Bytes())
 	}
-	// Only set CodeHash for actual contracts. Erigon returns emptyCodeHash
-	// (keccak256("")) for EOAs — setting it unconditionally makes IsContract()
-	// return true for all EOAs, breaking native-transfer handling in replay path.
-	if ch := as.backend.intraBlockState.GetCodeHash(addr); !erigonAcc.IsEmptyCodeHash(ch) {
-		pbAcc.CodeHash = ch.Bytes()
-	}
+	pbAcc.CodeHash = as.backend.intraBlockState.GetCodeHash(addr).Bytes()
 	acct.FromProto(pbAcc)
 	return nil
 }
@@ -157,9 +151,6 @@ func (as *accountStorage) Store(key []byte, value any) error {
 }
 
 // getBySlot attempts to read data directly from storage slots for better performance.
-// TODO: This function needs fixes - the storage slot calculation doesn't match actual GenericStorage layout.
-// The mapping slot calculation for mapping(bytes => uint256) may need adjustment.
-// For now, use contract.Get() in Load() which is functionally correct.
 func (as *accountStorage) getBySlot(key []byte) (*systemcontracts.GenericValue, error) {
 	idx, err := as.lookupIndex(key)
 	if err != nil {

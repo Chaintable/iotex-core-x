@@ -58,9 +58,11 @@ type (
 		blockInterval time.Duration
 		transmitter   transmitter
 		chain         chain
-		privKeys      map[string]crypto.PrivateKey
-		addrs         []string
-		mutex         sync.RWMutex
+		// mutex guards privKeys + addrs against concurrent UpdateProducerKeys
+		// (fork v2.3.8 hot-key rotation; not present upstream).
+		mutex    sync.RWMutex
+		privKeys map[string]crypto.PrivateKey
+		addrs    []string
 	}
 
 	getBroadcastListFunc func() []string
@@ -101,9 +103,7 @@ func NewInfoManager(cfg *Config, t transmitter, ch chain, blockInterval time.Dur
 	}
 	// init recurring tasks
 	broadcastTask := routine.NewRecurringTask(func() {
-		dm.mutex.RLock()
-		addrs := append([]string(nil), dm.addrs...)
-		dm.mutex.RUnlock()
+		addrs := dm.addrs
 		// broadcastlist or nodes who are turned on will broadcast
 		if len(addrs) > 0 {
 			if err := dm.BroadcastNodeInfo(context.Background(), addrs); err != nil {
@@ -219,25 +219,8 @@ func (dm *InfoManager) RequestSingleNodeInfoAsync(ctx context.Context, peer peer
 	return dm.transmitter.UnicastOutbound(ctx, peer, &iotextypes.NodeInfoRequest{})
 }
 
-// HandleNodeInfoRequest tell node info to peer
-func (dm *InfoManager) HandleNodeInfoRequest(ctx context.Context, peer peer.AddrInfo) error {
-	log.L().Debug("nodeinfo manager tell node info", zap.Any("peer", peer.ID.String()))
-	dm.mutex.RLock()
-	addrs := append([]string(nil), dm.addrs...)
-	dm.mutex.RUnlock()
-	infos, err := dm.genNodeInfoMsg(addrs)
-	if err != nil {
-		return err
-	}
-	for _, info := range infos {
-		if err := dm.transmitter.UnicastOutbound(ctx, peer, info); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // UpdateProducerKeys refreshes the producer key cache used for node-info broadcasts.
+// Fork-only (v2.3.8) — used by hot-key rotation flow.
 func (dm *InfoManager) UpdateProducerKeys(privKeys []crypto.PrivateKey) {
 	addrs := make([]string, 0, len(privKeys))
 	keyMaps := make(map[string]crypto.PrivateKey, len(privKeys))
@@ -253,9 +236,22 @@ func (dm *InfoManager) UpdateProducerKeys(privKeys []crypto.PrivateKey) {
 	dm.mutex.Unlock()
 }
 
+// HandleNodeInfoRequest tell node info to peer
+func (dm *InfoManager) HandleNodeInfoRequest(ctx context.Context, peer peer.AddrInfo) error {
+	log.L().Debug("nodeinfo manager tell node info", zap.Any("peer", peer.ID.String()))
+	infos, err := dm.genNodeInfoMsg(dm.addrs)
+	if err != nil {
+		return err
+	}
+	for _, info := range infos {
+		if err := dm.transmitter.UnicastOutbound(ctx, peer, info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (dm *InfoManager) genNodeInfoMsg(addrs []string) ([]*iotextypes.NodeInfo, error) {
-	dm.mutex.RLock()
-	defer dm.mutex.RUnlock()
 	infos := make([]*iotextypes.NodeInfo, 0, len(addrs))
 	tip := dm.chain.TipHeight()
 	ts := timestamppb.Now()

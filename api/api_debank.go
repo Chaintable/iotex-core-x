@@ -36,7 +36,8 @@ func buildSyntheticGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 	if gethBlock.BaseFee() == nil {
 		header := *gethBlock.Header()
 		header.BaseFee = big.NewInt(0)
-		gethBlock = types.NewBlockWithHeader(&header).WithBody(gethBlock.Transactions(), nil)
+		// v1.15.11: WithBody takes a Body struct (was 2 args in v1.13).
+		gethBlock = types.NewBlockWithHeader(&header).WithBody(types.Body{Transactions: gethBlock.Transactions()})
 	}
 	return gethBlock
 }

@@ -8,6 +8,9 @@ import (
 )
 
 func BuildReadStateRequest(data []byte) (protocol.StateContext, error) {
+	if len(data) < 4 {
+		return nil, stakingComm.ErrInvalidCallData
+	}
 	switch methodSig := hex.EncodeToString(data[:4]); methodSig {
 	case hex.EncodeToString(_candidatesMethod.ID):
 		return newCandidatesStateContext(data[4:])
@@ -17,6 +20,8 @@ func BuildReadStateRequest(data []byte) (protocol.StateContext, error) {
 		return newCandidateByAddressStateContext(data[4:])
 	case hex.EncodeToString(_candidateByIDMethod.ID):
 		return newCandidateByIDStateContext(data[4:])
+	case hex.EncodeToString(_candidateDeactivationMethod.ID):
+		return newCandidateDeactivationStateContext(data[4:])
 	default:
 		return nil, stakingComm.ErrInvalidCallSig
 	}

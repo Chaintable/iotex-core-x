@@ -245,7 +245,24 @@ func NewBlockchain(cfg Config, g genesis.Genesis, dao blockdao.BlockDAO, bbf Blo
 			log.L().Panic("failed to create tracer.", zap.Error(err))
 		}
 		chain.pipelineTracer = t
-		chain.logger = tracing.BuildHooks(t)
+		// v1.15.11 tracing.Hooks has no OnCommit field (it was a chaintable-private extension).
+		// OnCommit is now dispatched via WithPipelineCommitterCtx at OnCommit call sites in
+		// state/factory/{statedb,workingset}.go. OnOpcode / OnBalanceChange / OnSystemCallStart
+		// intentionally not wired: iotex follows pipeline's "Live Tracer + StateDB-based"
+		// [Priority 1] mode (whole state diff arrives via OnCommit), so opcode-level / balance
+		// per-write / EIP-4788 system-call hooks are not required.
+		chain.logger = &tracing.Hooks{
+			OnBlockchainInit: t.OnBlockchainInit,
+			OnClose:          t.OnClose,
+			OnBlockStart:     t.OnBlockStart,
+			OnBlockEnd:       t.OnBlockEnd,
+			OnGenesisBlock:   t.OnGenesisBlock,
+			OnTxStart:        t.OnTxStart,
+			OnTxEnd:          t.OnTxEnd,
+			OnEnter:          t.OnEnter,
+			OnExit:           t.OnExit,
+			OnLog:            t.OnLog,
+		}
 		log.L().Info("pipeline tracer created", zap.String("config", cfg.VMTraceConfig))
 	}
 
@@ -291,7 +308,13 @@ func (bc *blockchain) Start(ctx context.Context) error {
 	defer bc.mu.Unlock()
 	if bc.logger != nil {
 		ctx = protocol.WithPipelineHooksCtx(ctx, bc.logger)
-		ctx = protocol.WithPipelineEVMLoggerCtx(ctx, bc.pipelineTracer)
+	}
+	if bc.pipelineTracer != nil {
+		ctx = protocol.WithPipelineTracerCtx(ctx, bc.pipelineTracer)
+		// *PipelineTracer satisfies PipelineCommitter via its public OnCommit method;
+		// state/factory OnCommit call sites lookup via GetPipelineCommitterCtx so production
+		// path and test mock share a single dispatch point.
+		ctx = protocol.WithPipelineCommitterCtx(ctx, bc.pipelineTracer)
 	}
 	// pass registry to be used by state factory's initialization
 	ctx = protocol.WithFeatureWithHeightCtx(genesis.WithGenesisContext(
@@ -520,7 +543,13 @@ func (bc *blockchain) MintNewBlock(timestamp time.Time, opts ...MintOption) (*bl
 	ctx = protocol.WithFeatureCtx(ctx)
 	if bc.logger != nil {
 		ctx = protocol.WithPipelineHooksCtx(ctx, bc.logger)
-		ctx = protocol.WithPipelineEVMLoggerCtx(ctx, bc.pipelineTracer)
+	}
+	if bc.pipelineTracer != nil {
+		ctx = protocol.WithPipelineTracerCtx(ctx, bc.pipelineTracer)
+		// *PipelineTracer satisfies PipelineCommitter via its public OnCommit method;
+		// state/factory OnCommit call sites lookup via GetPipelineCommitterCtx so production
+		// path and test mock share a single dispatch point.
+		ctx = protocol.WithPipelineCommitterCtx(ctx, bc.pipelineTracer)
 	}
 	// run execution and update state trie root hash
 	blk, err := bc.bbf.Mint(ctx, producerPrivateKey)
@@ -608,7 +637,13 @@ func (bc *blockchain) commitBlock(blk *block.Block) error {
 	ctx = protocol.WithFeatureCtx(ctx)
 	if bc.logger != nil {
 		ctx = protocol.WithPipelineHooksCtx(ctx, bc.logger)
-		ctx = protocol.WithPipelineEVMLoggerCtx(ctx, bc.pipelineTracer)
+	}
+	if bc.pipelineTracer != nil {
+		ctx = protocol.WithPipelineTracerCtx(ctx, bc.pipelineTracer)
+		// *PipelineTracer satisfies PipelineCommitter via its public OnCommit method;
+		// state/factory OnCommit call sites lookup via GetPipelineCommitterCtx so production
+		// path and test mock share a single dispatch point.
+		ctx = protocol.WithPipelineCommitterCtx(ctx, bc.pipelineTracer)
 	}
 	// write block into DB
 	putTimer := bc.timerFactory.NewTimer("putBlock")

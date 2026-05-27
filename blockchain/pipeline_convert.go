@@ -75,7 +75,9 @@ func ConvertToGethBlock(blk *block.Block, g genesis.Genesis) *types.Block {
 		}
 		txs = append(txs, ethTx)
 	}
-	return types.NewBlockWithHeader(header).WithBody(txs, nil)
+	// v1.15.11 WithBody takes a Body struct (was 2 separate args in v1.13).
+	// Uncles/Withdrawals are empty for iotex blocks.
+	return types.NewBlockWithHeader(header).WithBody(types.Body{Transactions: txs})
 }
 
 // ConvertToGethReceipt converts an iotex action.Receipt to a geth types.Receipt

@@ -17,6 +17,8 @@ var (
 		WorkerBufferSize:   2000,
 		ActionExpiry:       10 * time.Minute,
 		MinGasPriceStr:     big.NewInt(unit.Qev).String(),
+		MaxNumBlobsPerAcct: 16,
+		EnableBundlePool:   true,
 		BlackList: []string{
 			"io10epxv6w4he9pgx0qtagm7lc78aw9jsm7s8t0tw",
 			"io10jr2hh4xcm3s3yhq98zudxh08e9uume6e0ekee",
@@ -49,7 +51,6 @@ var (
 			"io1zh88jlem8vvzp9z6t73rs4qd72jnzpm8pv8ndu",
 		},
 		BlackListActiveHeight: 45404174,
-		MaxNumBlobsPerAcct:    16,
 		Store: &StoreConfig{
 			Datadir: "/var/data/actpool.cache",
 		},
@@ -78,6 +79,8 @@ type Config struct {
 	Store *StoreConfig `yaml:"store"`
 	// MaxNumBlobsPerAcct defines the maximum number of blob txs an account can have
 	MaxNumBlobsPerAcct uint64 `yaml:"maxNumBlobsPerAcct"`
+	// EnableBundlePool indicates whether to enable bundle pool
+	EnableBundlePool bool `yaml:"enableBundlePool"`
 }
 
 // MinGasPrice returns the minimal gas price threshold
@@ -87,6 +90,11 @@ func (ap Config) MinGasPrice() *big.Int {
 		log.S().Panicf("Error when parsing minimal gas price string: %s", ap.MinGasPriceStr)
 	}
 	return mgp
+}
+
+// IsBlackListedFunc returns a function that checks if an address is blacklisted at a given height
+func (ap Config) IsBlackListedFunc() func(addr string, height uint64) bool {
+	return IsBlackListedFunc(ap.BlackList, ap.BlackListActiveHeight)
 }
 
 // StoreConfig is the configuration for the blob store

@@ -8,6 +8,7 @@ package blockchain
 import (
 	"crypto/ecdsa"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,8 @@ type (
 		ContractStakingIndexDBPath string           `yaml:"contractStakingIndexDBPath"`
 		BlobStoreDBPath            string           `yaml:"blobStoreDBPath"`
 		BlobStoreRetentionDays     uint32           `yaml:"blobStoreRetentionDays"`
+		PatchReceiptIndexPath      string           `yaml:"patchReceiptIndexPath"`
+		PatchReceiptIndexEndHeight uint64           `yaml:"patchReceiptIndexEndHeight"`
 		HistoryIndexPath           string           `yaml:"historyIndexPath"`
 		HistoryBlockRetention      uint64           `yaml:"historyBlockRetention"`
 		ID                         uint32           `yaml:"id"`
@@ -267,11 +270,5 @@ func (cfg *Config) whitelistSignatureScheme(sk crypto.PrivateKey) bool {
 	if sigScheme == "" {
 		return false
 	}
-	for _, e := range cfg.SignatureScheme {
-		if sigScheme == e {
-			// signature scheme is whitelisted
-			return true
-		}
-	}
-	return false
+	return slices.Contains(cfg.SignatureScheme, sigScheme)
 }

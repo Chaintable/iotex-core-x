@@ -7,8 +7,9 @@ package contractstaking
 
 import (
 	"context"
+	"maps"
 	"math/big"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/iotexproject/iotex-address/address"
@@ -177,7 +178,7 @@ func (wc *wrappedCache) BucketsByCandidate(candidate address.Address) ([]uint64,
 	}
 	retInfos := make([]*bucketInfo, 0, len(retIDs))
 	retTypes := make([]*BucketType, 0, len(retIDs))
-	sort.Slice(retIDs, func(i, j int) bool { return retIDs[i] < retIDs[j] })
+	slices.Sort(retIDs)
 	for _, id := range retIDs {
 		info, ok := wc.updatedBucketInfos[id]
 		if !ok {
@@ -271,9 +272,7 @@ func (wc *wrappedCache) Clone() stakingCache {
 	updatedCandidates := make(map[string]map[uint64]bool, len(wc.updatedCandidates))
 	for delegate, buckets := range wc.updatedCandidates {
 		updatedBuckets := make(map[uint64]bool, len(buckets))
-		for id, updated := range buckets {
-			updatedBuckets[id] = updated
-		}
+		maps.Copy(updatedBuckets, buckets)
 		updatedCandidates[delegate] = updatedBuckets
 	}
 	return &wrappedCache{

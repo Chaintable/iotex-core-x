@@ -134,7 +134,8 @@ func TestProtocol_GrantEpochReward(t *testing.T) {
 		sp := &staking.Protocol{}
 		require.NoError(t, sp.Register(registry))
 		patches := gomonkey.NewPatches()
-		patches = patches.ApplyMethodReturn(sp, "SlashCandidate", nil)
+		patches = patches.ApplyMethodReturn(sp, "SlashCandidateByOperator", nil)
+		patches = patches.ApplyMethodReturn(sp, "SlashCandidateByID", nil)
 		defer patches.Reset()
 		ctx = protocol.WithFeatureCtx(ctx)
 		ctx = protocol.WithFeatureWithHeightCtx(ctx)
@@ -604,6 +605,8 @@ func TestProtocol_CalculateReward(t *testing.T) {
 		{unit.ConvertIotxToRau(12), false, dardanellesBlockReward, unit.ConvertIotxToRau(20), unit.ConvertIotxToRau(12)},
 		{unit.ConvertIotxToRau(3), true, wakeBlockReward, big.NewInt(0).Add(unit.ConvertIotxToRau(3), wakeBlockReward), unit.ConvertIotxToRau(3)},
 		{unit.ConvertIotxToRau(6), true, wakeBlockReward, big.NewInt(0).Add(unit.ConvertIotxToRau(6), wakeBlockReward), unit.ConvertIotxToRau(6)},
+		// {unit.ConvertIotxToRau(3), true, (&big.Int{}).Sub(wakeBlockReward, unit.ConvertIotxToRau(3)), wakeBlockReward, unit.ConvertIotxToRau(3)},
+		// {unit.ConvertIotxToRau(6), true, (&big.Int{}).SetInt64(0), unit.ConvertIotxToRau(6), unit.ConvertIotxToRau(6)},
 	} {
 		testProtocol(t, func(t *testing.T, ctx context.Context, sm protocol.StateManager, p *Protocol) {
 			// update block reward

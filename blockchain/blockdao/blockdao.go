@@ -63,17 +63,18 @@ type (
 	}
 
 	blockDAO struct {
-		blockStore   BlockStore
-		blobStore    BlobStore
-		indexers     []BlockIndexer
-		timerFactory *prometheustimer.TimerFactory
-		lifecycle    lifecycle.Lifecycle
-		headerCache  cache.LRUCache
-		footerCache  cache.LRUCache
-		receiptCache cache.LRUCache
-		blockCache   cache.LRUCache
-		txLogCache   cache.LRUCache
-		tipHeight    uint64
+		blockStore     BlockStore
+		blobStore      BlobStore
+		receiptIndexer *ReceiptIndexer
+		indexers       []BlockIndexer
+		timerFactory   *prometheustimer.TimerFactory
+		lifecycle      lifecycle.Lifecycle
+		headerCache    cache.LRUCache
+		footerCache    cache.LRUCache
+		receiptCache   cache.LRUCache
+		blockCache     cache.LRUCache
+		txLogCache     cache.LRUCache
+		tipHeight      uint64
 	}
 )
 
@@ -82,6 +83,13 @@ type Option func(*blockDAO)
 func WithBlobStore(bs BlobStore) Option {
 	return func(dao *blockDAO) {
 		dao.blobStore = bs
+	}
+}
+
+// WithReceiptIndexer adds receipt indexer to block DAO
+func WithReceiptIndexer(ri *ReceiptIndexer) Option {
+	return func(dao *blockDAO) {
+		dao.receiptIndexer = ri
 	}
 }
 
@@ -102,6 +110,9 @@ func NewBlockDAOWithIndexersAndCache(blkStore BlockStore, indexers []BlockIndexe
 
 	if blockDAO.blobStore != nil {
 		blockDAO.lifecycle.Add(blockDAO.blobStore)
+	}
+	if blockDAO.receiptIndexer != nil {
+		blockDAO.lifecycle.Add(blockDAO.receiptIndexer)
 	}
 	for _, indexer := range indexers {
 		blockDAO.lifecycle.Add(indexer)
@@ -292,6 +303,13 @@ func (dao *blockDAO) Header(h hash.Hash256) (*block.Header, error) {
 	_cacheMtc.WithLabelValues("miss_header").Inc()
 	header, err := dao.blockStore.Header(h)
 	if err != nil {
+		// Genesis block (height 0) is never stored via PutBlock, so its header
+		// is not in the hash-based index. Check if this hash matches the genesis
+		// hash (from genesis config) and return the static genesis block header.
+		if h == block.GenesisHash() {
+			header := block.GenesisBlock().Header
+			return &header, nil
+		}
 		return nil, err
 	}
 
@@ -307,9 +325,23 @@ func (dao *blockDAO) GetReceipts(height uint64) ([]*action.Receipt, error) {
 	_cacheMtc.WithLabelValues("miss_receipts").Inc()
 	timer := dao.timerFactory.NewTimer("get_receipt")
 	defer timer.End()
-	receipts, err := dao.blockStore.GetReceipts(height)
-	if err != nil {
-		return nil, err
+	var receipts []*action.Receipt
+	var err error
+	if dao.receiptIndexer != nil {
+		receipts, err = dao.receiptIndexer.Receipts(height)
+		switch errors.Cause(err) {
+		case nil:
+		case ErrIndexOutOfRange, db.ErrNotExist, db.ErrBucketNotExist:
+			receipts = nil
+		default:
+			return nil, err
+		}
+	}
+	if receipts == nil {
+		receipts, err = dao.blockStore.GetReceipts(height)
+		if err != nil {
+			return nil, err
+		}
 	}
 	tlogs, err := dao.blockStore.TransactionLogs(height)
 	if err != nil {

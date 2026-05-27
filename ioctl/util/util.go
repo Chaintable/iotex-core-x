@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -209,10 +210,8 @@ func JwtAuth() (jwt metadata.MD, err error) {
 // CheckArgs used for check ioctl cmd arg(s)'s num
 func CheckArgs(validNum ...int) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
-		for _, n := range validNum {
-			if len(args) == n {
-				return nil
-			}
+		if slices.Contains(validNum, len(args)) {
+			return nil
 		}
 		nums := strings.Replace(strings.Trim(fmt.Sprint(validNum), "[]"), " ", " or ", -1)
 		return fmt.Errorf("accepts "+nums+" arg(s), received %d", len(args))

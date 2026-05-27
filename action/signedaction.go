@@ -161,6 +161,36 @@ func SignedCandidateUpdate(
 	return selp, nil
 }
 
+// SignedCandidateUpdateWithBLS returns a signed candidate update with BLS public key
+func SignedCandidateUpdateWithBLS(
+	nonce uint64,
+	name, operatorAddrStr, rewardAddrStr string,
+	blsPubKey []byte,
+	gasLimit uint64,
+	gasPrice *big.Int,
+	registererPriKey crypto.PrivateKey,
+	options ...SignedActionOption,
+) (*SealedEnvelope, error) {
+	cu, err := NewCandidateUpdateWithBLS(name, operatorAddrStr, rewardAddrStr, blsPubKey)
+	if err != nil {
+		return nil, err
+	}
+	bd := &EnvelopeBuilder{}
+	bd = bd.SetNonce(nonce).
+		SetGasPrice(gasPrice).
+		SetGasLimit(gasLimit).
+		SetAction(cu)
+	for _, opt := range options {
+		opt(bd)
+	}
+	elp := bd.Build()
+	selp, err := Sign(elp, registererPriKey)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to sign candidate update %v", elp)
+	}
+	return selp, nil
+}
+
 // SignedCandidateActivate returns a signed candidate selfstake
 func SignedCandidateActivate(
 	nonce uint64,
@@ -479,6 +509,33 @@ func SignedMigrateStake(
 	selp, err := Sign(elp, senderPriKey)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to sign candidate transfer ownership %v", elp)
+	}
+	return selp, nil
+}
+
+// SignedCandidateDeactivate returns a signed candidate deactivate action
+func SignedCandidateDeactivate(
+	nonce uint64,
+	op CandidateDeactivateOp,
+	gasLimit uint64,
+	gasPrice *big.Int,
+	senderPriKey crypto.PrivateKey,
+	options ...SignedActionOption,
+) (*SealedEnvelope, error) {
+	cd := NewCandidateDeactivate()
+	cd.op = op
+	bd := &EnvelopeBuilder{}
+	bd = bd.SetNonce(nonce).
+		SetGasPrice(gasPrice).
+		SetGasLimit(gasLimit).
+		SetAction(cd)
+	for _, opt := range options {
+		opt(bd)
+	}
+	elp := bd.Build()
+	selp, err := Sign(elp, senderPriKey)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to sign candidate deactivate %v", elp)
 	}
 	return selp, nil
 }

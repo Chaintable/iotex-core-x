@@ -80,7 +80,8 @@ func TestStateDiffCollectorSenderBalanceBug(t *testing.T) {
 	require.NoError(rolldpos.NewProtocol(g.NumCandidateDelegates, g.NumDelegates, g.NumSubEpochs).Register(registry))
 	getBlockHash := func(uint64) (hash.Hash256, error) { return hash.ZeroHash256, nil }
 	getBlockTime := func(uint64) (time.Time, error) { return time.Time{}, nil }
-	require.NoError(execution.NewProtocol(getBlockHash, rewarding.DepositGas, getBlockTime).Register(registry))
+	// v2.4.1 added IsBlackListedFunc 4th param; tests don't blacklist anyone.
+	require.NoError(execution.NewProtocol(getBlockHash, rewarding.DepositGas, getBlockTime, nil).Register(registry))
 	require.NoError(rewarding.NewProtocol(g.Rewarding).Register(registry))
 
 	chainCfg := blockchain.DefaultConfig

@@ -14,11 +14,11 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/tracing"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -364,6 +364,7 @@ func TestSDBTwoBlocksSamePrevHash(t *testing.T) {
 
 	ctrl := gomock.NewController(t)
 	ap := mock_actpool.NewMockActPool(ctrl)
+	ap.EXPECT().BundlePool().Return(nil).AnyTimes()
 	ap.EXPECT().PendingActionMap().Return(map[string][]*action.SealedEnvelope{}).Times(4)
 	blk1, err := sdb.Mint(
 		protocol.WithBlockchainCtx(
@@ -848,7 +849,7 @@ func testNonce(ctx context.Context, sf Factory, t *testing.T) {
 	ctx = protocol.WithBlockchainCtx(ctx, protocol.BlockchainCtx{
 		ChainID: 1,
 	})
-	_, err = ws.runAction(ctx, selp)
+	_, err = ws.runAction(ctx, selp, true)
 	require.NoError(t, err)
 	state, err := accountutil.AccountState(ctx, sf, a)
 	require.NoError(t, err)
@@ -1018,6 +1019,56 @@ func testCommit(factory Factory, t *testing.T) {
 	require.NoError(factory.PutBlock(ctx, &blk))
 }
 
+// mockPipelineCommitter implements protocol.PipelineCommitter so OnCommit
+// assertions can run without constructing a full *PipelineTracer (which would
+// need etcd / Kafka init). Signature mirrors pipeline RPCTracer.OnCommit exactly
+// (common.Hash keys + []byte values) — see action/protocol/context.go.
+type commitCallArgs struct {
+	originRoot     common.Hash
+	root           common.Hash
+	destructs      map[common.Hash]struct{}
+	accounts       map[common.Hash][]byte
+	accountsOrigin map[common.Address][]byte
+	storages       map[common.Hash]map[common.Hash][]byte
+	storagesOrigin map[common.Address]map[common.Hash][]byte
+	codes          map[common.Hash][]byte
+}
+
+type mockPipelineCommitter struct {
+	mu        sync.Mutex
+	callCount int
+	calls     []commitCallArgs
+}
+
+func (m *mockPipelineCommitter) OnCommit(
+	originRoot, root common.Hash,
+	destructs map[common.Hash]struct{},
+	accounts map[common.Hash][]byte,
+	accountsOrigin map[common.Address][]byte,
+	storages map[common.Hash]map[common.Hash][]byte,
+	storagesOrigin map[common.Address]map[common.Hash][]byte,
+	codes map[common.Hash][]byte,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callCount++
+	m.calls = append(m.calls, commitCallArgs{
+		originRoot, root, destructs, accounts, accountsOrigin, storages, storagesOrigin, codes,
+	})
+}
+
+func (m *mockPipelineCommitter) CallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.callCount
+}
+
+func (m *mockPipelineCommitter) LastCall() commitCallArgs {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[len(m.calls)-1]
+}
+
 func TestCommit_OnCommitUsesTipStateDigestAsOriginRoot(t *testing.T) {
 	require := require.New(t)
 
@@ -1057,20 +1108,8 @@ func TestCommit_OnCommitUsesTipStateDigestAsOriginRoot(t *testing.T) {
 	}), cfg.Genesis)
 	ctx = protocol.WithFeatureCtx(ctx)
 
-	var (
-		called    bool
-		originArg common.Hash
-		rootArg   common.Hash
-		accounts  map[common.Hash][]byte
-	)
-	ctx = protocol.WithPipelineHooksCtx(ctx, &tracing.Hooks{
-		OnCommit: func(originRoot common.Hash, root common.Hash, _ map[common.Hash]struct{}, newAccounts map[common.Hash][]byte, _ map[common.Address][]byte, _ map[common.Hash]map[common.Hash][]byte, _ map[common.Address]map[common.Hash][]byte, _ map[common.Hash][]byte) {
-			called = true
-			originArg = originRoot
-			rootArg = root
-			accounts = newAccounts
-		},
-	})
+	mock := &mockPipelineCommitter{}
+	ctx = protocol.WithPipelineCommitterCtx(ctx, mock)
 
 	tx := action.NewTransfer(big.NewInt(10), identityset.Address(29).String(), nil)
 	elp := (&action.EnvelopeBuilder{}).SetNonce(1).SetAction(tx).Build()
@@ -1086,12 +1125,13 @@ func TestCommit_OnCommitUsesTipStateDigestAsOriginRoot(t *testing.T) {
 	require.NoError(err)
 
 	require.NoError(sdb.PutBlock(ctx, &blk))
-	require.True(called, "OnCommit should be called")
-	require.Equal(common.BytesToHash(tipDigest[:]), originArg)
-	require.NotEqual(common.Hash{}, rootArg)
-	require.GreaterOrEqual(len(accounts), 2)
-	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(28).Bytes()))
-	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(29).Bytes()))
+	require.Equal(1, mock.CallCount(), "OnCommit should be called exactly once")
+	last := mock.LastCall()
+	require.Equal(common.BytesToHash(tipDigest[:]), last.originRoot)
+	require.NotEqual(common.Hash{}, last.root)
+	require.GreaterOrEqual(len(last.accounts), 2)
+	require.Contains(last.accounts, ethcrypto.Keccak256Hash(identityset.Address(28).Bytes()))
+	require.Contains(last.accounts, ethcrypto.Keccak256Hash(identityset.Address(29).Bytes()))
 }
 
 func TestCommit_OnCommitAfterValidateCollectsNonEVMStateDiff(t *testing.T) {
@@ -1150,6 +1190,9 @@ func TestCommit_OnCommitAfterValidateCollectsNonEVMStateDiff(t *testing.T) {
 	ap.EXPECT().PendingActionMap().Return(map[string][]*action.SealedEnvelope{
 		identityset.Address(28).String(): []*action.SealedEnvelope{selp},
 	}).Times(1)
+	// v2.4.1 added BundlePool() probing in Mint flow (workingset.go:1096). Test
+	// doesn't exercise bundles; return nil pool so Mint skips that branch.
+	ap.EXPECT().BundlePool().Return(nil).AnyTimes()
 
 	blk, err := sdbSrc.Mint(mintCtx, ap, identityset.PrivateKey(27))
 	require.NoError(err)
@@ -1170,22 +1213,15 @@ func TestCommit_OnCommitAfterValidateCollectsNonEVMStateDiff(t *testing.T) {
 	validateCtx = protocol.WithFeatureCtx(validateCtx)
 	require.NoError(sdbDst.Validate(validateCtx, blk))
 
-	var (
-		called   bool
-		accounts map[common.Hash][]byte
-	)
-	commitCtx := protocol.WithPipelineHooksCtx(validateCtx, &tracing.Hooks{
-		OnCommit: func(_ common.Hash, _ common.Hash, _ map[common.Hash]struct{}, newAccounts map[common.Hash][]byte, _ map[common.Address][]byte, _ map[common.Hash]map[common.Hash][]byte, _ map[common.Address]map[common.Hash][]byte, _ map[common.Hash][]byte) {
-			called = true
-			accounts = newAccounts
-		},
-	})
+	mock := &mockPipelineCommitter{}
+	commitCtx := protocol.WithPipelineCommitterCtx(validateCtx, mock)
 
 	require.NoError(sdbDst.PutBlock(commitCtx, blk))
-	require.True(called, "OnCommit should be called")
-	require.GreaterOrEqual(len(accounts), 2)
-	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(28).Bytes()))
-	require.Contains(accounts, ethcrypto.Keccak256Hash(identityset.Address(29).Bytes()))
+	require.Equal(1, mock.CallCount(), "OnCommit should be called exactly once")
+	last := mock.LastCall()
+	require.GreaterOrEqual(len(last.accounts), 2)
+	require.Contains(last.accounts, ethcrypto.Keccak256Hash(identityset.Address(28).Bytes()))
+	require.Contains(last.accounts, ethcrypto.Keccak256Hash(identityset.Address(29).Bytes()))
 }
 
 func TestSTXPickAndRunActions(t *testing.T) {
@@ -1246,6 +1282,7 @@ func testNewBlockBuilder(factory Factory, t *testing.T) {
 	accMap[identityset.Address(29).String()] = []*action.SealedEnvelope{selp2}
 	ctrl := gomock.NewController(t)
 	ap := mock_actpool.NewMockActPool(ctrl)
+	ap.EXPECT().BundlePool().Return(nil).Times(1)
 	ap.EXPECT().PendingActionMap().Return(accMap).Times(1)
 	gasLimit := uint64(1000000)
 	ctx := protocol.WithBlockCtx(context.Background(),
@@ -1584,6 +1621,7 @@ func TestMintBlocksWithCandidateUpdate(t *testing.T) {
 	)
 	ctx = protocol.WithFeatureCtx(ctx)
 	mockActPool := mock_actpool.NewMockActPool(gomock.NewController(t))
+	mockActPool.EXPECT().BundlePool().Return(nil).AnyTimes()
 	mockActPool.EXPECT().PendingActionMap().Return(map[string][]*action.SealedEnvelope{
 		a.String(): {selp1},
 	}).Times(1)
@@ -1721,6 +1759,7 @@ func TestMintBlocksWithTransfers(t *testing.T) {
 	)
 	ctx = protocol.WithFeatureCtx(ctx)
 	mockActPool := mock_actpool.NewMockActPool(gomock.NewController(t))
+	mockActPool.EXPECT().BundlePool().Return(nil).AnyTimes()
 	mockActPool.EXPECT().PendingActionMap().Return(map[string][]*action.SealedEnvelope{
 		a.String(): {selp1},
 	}).Times(1)

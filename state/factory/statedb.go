@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
@@ -318,6 +319,7 @@ func (sdb *stateDB) newReadOnlyWorkingSet(ctx context.Context, height uint64) (*
 	// Protocol views (staking candidates, etc.) need to read from stateDB's
 	// KV store which has the data; erigon's historical changesets may be
 	// incomplete and return empty results for system contract queries.
+	// Fork PR #3 8f65be274 + c61369c18: log error (not panic) for Simulate fault-tolerance.
 	ws.views = protocol.NewLazyViews(func() protocol.Views {
 		views, err := sdb.registry.StartAll(ctx, sdb)
 		if err != nil {
@@ -424,7 +426,13 @@ func (sdb *stateDB) Mint(
 	ap actpool.ActPool,
 	pk crypto.PrivateKey,
 ) (*block.Block, error) {
-	if hooks := protocol.GetPipelineHooksCtx(ctx); hooks != nil && hooks.OnCommit != nil {
+	// OnCommit is dispatched via PipelineCommitter ctx (R1: v1.15.11 tracing.Hooks has no
+	// OnCommit field). Probe presence of pipelineTracer/Committer to decide if collector setup
+	// is needed; production wires both keys at the same time.
+	// Setup collector if either PipelineTracerCtx (production wires *PipelineTracer)
+	// or PipelineCommitterCtx (tests wire mock) is set. Production wires both;
+	// tests usually wire only the committer.
+	if protocol.GetPipelineTracerCtx(ctx) != nil || protocol.GetPipelineCommitterCtx(ctx) != nil {
 		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
 	}
 	bcCtx := protocol.MustGetBlockchainCtx(ctx)
@@ -520,14 +528,21 @@ func (sdb *stateDB) PutBlock(ctx context.Context, blk *block.Block) (err error) 
 	hooks := protocol.GetPipelineHooksCtx(ctx)
 	if hooks != nil && hooks.OnBlockStart != nil {
 		gethBlock := blockchain.ConvertToGethBlock(blk, sdb.cfg.Genesis)
-		hooks.OnBlockStart(gethBlock)
+		// v1.15.11 BlockStartHook = func(event BlockEvent). Finalized/Safe headers are not
+		// applicable to iotex's Rolldpos consensus, leave nil — pipeline's PipelineTracer
+		// only reads event.Block.
+		hooks.OnBlockStart(tracing.BlockEvent{Block: gethBlock})
 	}
 	if hooks != nil && hooks.OnBlockEnd != nil {
 		defer func() {
 			hooks.OnBlockEnd(err)
 		}()
 	}
-	if hooks != nil && hooks.OnCommit != nil {
+	// R1: OnCommit moved off tracing.Hooks. Setup collector when committer is wired.
+	// Setup collector if either PipelineTracerCtx (production wires *PipelineTracer)
+	// or PipelineCommitterCtx (tests wire mock) is set. Production wires both;
+	// tests usually wire only the committer.
+	if protocol.GetPipelineTracerCtx(ctx) != nil || protocol.GetPipelineCommitterCtx(ctx) != nil {
 		ctx = protocol.WithStateDiffCollectorCtx(ctx, protocol.NewPipelineStateDiffCollector())
 	}
 	ctx = protocol.WithRegistry(ctx, sdb.registry)

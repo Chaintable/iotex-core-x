@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"time"
 
+	ptracer "github.com/Chaintable/pipeline/tracer"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -168,18 +169,27 @@ type (
 		StoreVoteOfNFTBucketIntoView            bool
 		CandidateSlashByOwner                   bool
 		CandidateBLSPublicKeyNotCopied          bool
+		OnlyOwnerCanUpdateBLSPublicKey          bool
+		PrePectraEVM                            bool
+		// AlwaysWriteCachedContract if true, CommitContracts writes back all cached
+		// contracts regardless of whether they were modified; if false, only dirty
+		// contracts are committed and written back
+		AlwaysWriteCachedContract bool
+		NoCandidateExitQueue      bool
 	}
 
 	// FeatureWithHeightCtx provides feature check functions.
 	FeatureWithHeightCtx struct {
-		GetUnproductiveDelegates CheckFunc
-		ReadStateFromDB          CheckFunc
-		UseV2Staking             CheckFunc
-		EnableNativeStaking      CheckFunc
-		StakingCorrectGas        CheckFunc
-		CalculateProbationList   CheckFunc
-		LoadCandidatesLegacy     CheckFunc
-		CandCenterHasAlias       CheckFunc
+		GetUnproductiveDelegates        CheckFunc
+		ReadStateFromDB                 CheckFunc
+		UseV2Staking                    CheckFunc
+		EnableNativeStaking             CheckFunc
+		StakingCorrectGas               CheckFunc
+		CalculateProbationList          CheckFunc
+		LoadCandidatesLegacy            CheckFunc
+		CandCenterHasAlias              CheckFunc
+		CandidateWithoutIdentity        CheckFunc
+		CandidateWithoutIdentityStorage CheckFunc
 	}
 )
 
@@ -336,6 +346,10 @@ func WithFeatureCtx(ctx context.Context) context.Context {
 			StoreVoteOfNFTBucketIntoView:            !g.IsXingu(height),
 			CandidateSlashByOwner:                   !g.IsXinguBeta(height),
 			CandidateBLSPublicKeyNotCopied:          !g.IsXinguBeta(height),
+			OnlyOwnerCanUpdateBLSPublicKey:          !g.IsYap(height),
+			PrePectraEVM:                            !g.IsYap(height),
+			AlwaysWriteCachedContract:               !g.IsYap(height),
+			NoCandidateExitQueue:                    !g.IsYap(height),
 		},
 	)
 }
@@ -394,6 +408,12 @@ func WithFeatureWithHeightCtx(ctx context.Context) context.Context {
 			CandCenterHasAlias: func(height uint64) bool {
 				return !g.IsOkhotsk(height)
 			},
+			CandidateWithoutIdentity: func(height uint64) bool {
+				return !g.IsYapBeta(height)
+			},
+			CandidateWithoutIdentityStorage: func(height uint64) bool {
+				return !g.IsYap(height)
+			},
 		},
 	)
 }
@@ -438,17 +458,53 @@ func GetPipelineHooksCtx(ctx context.Context) *tracing.Hooks {
 	return hooks
 }
 
-type pipelineEVMLoggerContextKey struct{}
+// Pipeline tracer ctx — drives OnCommit via direct *PipelineTracer call (R1).
+// v1.15.11 tracing.Hooks struct has no OnCommit field (chaintable's geth fork extension);
+// iotex-core merge v2.4.1 onward keeps the *PipelineTracer reference in ctx and dispatches
+// OnCommit through it instead of through hooks.OnCommit.
+type pipelineTracerContextKey struct{}
 
-// WithPipelineEVMLoggerCtx adds pipeline EVM logger to context (separate from VMConfigCtx to avoid triggering TraceStart/TraceEnd)
-func WithPipelineEVMLoggerCtx(ctx context.Context, logger vm.EVMLogger) context.Context {
-	return context.WithValue(ctx, pipelineEVMLoggerContextKey{}, logger)
+// WithPipelineTracerCtx attaches a *PipelineTracer to ctx for OnCommit dispatch.
+func WithPipelineTracerCtx(ctx context.Context, pt *ptracer.PipelineTracer) context.Context {
+	return context.WithValue(ctx, pipelineTracerContextKey{}, pt)
 }
 
-// GetPipelineEVMLoggerCtx returns the pipeline EVM logger from context, nil if not set
-func GetPipelineEVMLoggerCtx(ctx context.Context) vm.EVMLogger {
-	logger, _ := ctx.Value(pipelineEVMLoggerContextKey{}).(vm.EVMLogger)
-	return logger
+// GetPipelineTracerCtx returns the *PipelineTracer from ctx, nil if not set.
+func GetPipelineTracerCtx(ctx context.Context) *ptracer.PipelineTracer {
+	pt, _ := ctx.Value(pipelineTracerContextKey{}).(*ptracer.PipelineTracer)
+	return pt
+}
+
+// PipelineCommitter is the minimal interface for *tracer.PipelineTracer.OnCommit.
+// Field/value types match pipeline OnCommit signature exactly (common.Hash keys +
+// []byte values), not the conceptual *types.StateAccount form used elsewhere.
+// Production wires WithPipelineCommitterCtx(ctx, bc.pipelineTracer) — *PipelineTracer
+// satisfies this interface via its public OnCommit. Tests can wire a mock implementing
+// the same signature so OnCommit dispatch is asserted without constructing a full
+// PipelineTracer (which would require etcd / Kafka init).
+type PipelineCommitter interface {
+	OnCommit(
+		originRoot, root common.Hash,
+		destructs map[common.Hash]struct{},
+		accounts map[common.Hash][]byte,
+		accountsOrigin map[common.Address][]byte,
+		storages map[common.Hash]map[common.Hash][]byte,
+		storagesOrigin map[common.Address]map[common.Hash][]byte,
+		codes map[common.Hash][]byte,
+	)
+}
+
+type pipelineCommitterContextKey struct{}
+
+// WithPipelineCommitterCtx attaches a PipelineCommitter to ctx.
+func WithPipelineCommitterCtx(ctx context.Context, c PipelineCommitter) context.Context {
+	return context.WithValue(ctx, pipelineCommitterContextKey{}, c)
+}
+
+// GetPipelineCommitterCtx returns the PipelineCommitter from ctx, nil if not set.
+func GetPipelineCommitterCtx(ctx context.Context) PipelineCommitter {
+	c, _ := ctx.Value(pipelineCommitterContextKey{}).(PipelineCommitter)
+	return c
 }
 
 // PipelineStateDiffCollector accumulates state diffs across transactions within a block

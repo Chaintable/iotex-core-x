@@ -10,14 +10,17 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"math/big"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
+	ethstate "github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/stateless"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie/utils"
 	"github.com/holiman/uint256"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -88,7 +91,12 @@ type (
 		panicUnrecoverableError    bool
 		enableCancun               bool
 		fixRevertSnapshot          bool
-		dirtyAccounts              map[common.Address]struct{} // non-contract accounts modified by EVM (for pipeline state diff)
+		// ignoreBalanceChangeTouchAccount indicates whether to ignore balance change touch account
+		ignoreBalanceChangeTouchAccount bool
+		// skipWriteCleanContract indicates whether to skip writing back read-only
+		// contracts in CommitContracts; when true, only contracts with dirty state
+		// or code are committed and written back to the state trie
+		skipWriteCleanContract bool
 	}
 )
 
@@ -209,6 +217,22 @@ func WithContext(ctx context.Context) StateDBAdapterOption {
 	}
 }
 
+// IgnoreBalanceChangeTouchAccountOption set ignoreBalanceChangeTouchAccount as true
+func IgnoreBalanceChangeTouchAccountOption() StateDBAdapterOption {
+	return func(adapter *StateDBAdapter) error {
+		adapter.ignoreBalanceChangeTouchAccount = true
+		return nil
+	}
+}
+
+// SkipWriteCleanContractOption set skipWriteCleanContract as true
+func SkipWriteCleanContractOption() StateDBAdapterOption {
+	return func(adapter *StateDBAdapter) error {
+		adapter.skipWriteCleanContract = true
+		return nil
+	}
+}
+
 // NewStateDBAdapter creates a new state db with iotex blockchain
 func NewStateDBAdapter(
 	sm protocol.StateManager,
@@ -234,7 +258,6 @@ func NewStateDBAdapter(
 		accessListSnapshot:     make(map[int]*accessList),
 		logsSnapshot:           make(map[int]int),
 		txLogsSnapshot:         make(map[int]int),
-		dirtyAccounts:          make(map[common.Address]struct{}),
 		ctx:                    context.Background(),
 	}
 	for _, opt := range opts {
@@ -307,48 +330,75 @@ func (stateDB *StateDBAdapter) CreateAccount(evmAddr common.Address) {
 	log.T(stateDB.ctx).Debug("Called CreateAccount.", log.Hex("addrHash", evmAddr[:]))
 }
 
+// CreateContract creates a contract in iotx blockchain
+func (stateDB *StateDBAdapter) CreateContract(evmAddr common.Address) {
+	// TODO(pectra): implement CreateContract
+}
+
 // SubBalance subtracts balance from account
-func (stateDB *StateDBAdapter) SubBalance(evmAddr common.Address, a256 *uint256.Int) {
+func (stateDB *StateDBAdapter) SubBalance(evmAddr common.Address, a256 *uint256.Int, _ tracing.BalanceChangeReason) uint256.Int {
 	amount := a256.ToBig()
 	if amount.Cmp(big.NewInt(int64(0))) == 0 {
-		return
+		org, err := accountutil.Recorded(stateDB.sm, evmAddr)
+		switch errors.Cause(err) {
+		case nil:
+			return *uint256.MustFromBig(org.Balance)
+		case state.ErrStateNotExist:
+			return *common.U2560
+		default:
+			stateDB.assertError(err, "Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex()))
+			return *common.U2560
+		}
 	}
-	// stateDB.GetBalance(evmAddr)
-	log.T(stateDB.ctx).Debug(fmt.Sprintf("SubBalance %v from %s", amount, evmAddr.Hex()))
+	log.T(stateDB.ctx).Debug(fmt.Sprintf("SubBalance %v from %s", a256, evmAddr.Hex()))
 	addr, err := address.FromBytes(evmAddr.Bytes())
 	if stateDB.assertError(err, "Failed to convert evm address.", zap.Error(err)) {
-		return
+		return *common.U2560
 	}
 	state, err := stateDB.accountState(evmAddr)
 	if stateDB.assertError(err, "Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-		return
+		return *common.U2560
 	}
 	err = state.SubBalance(amount)
 	if stateDB.assertError(err, "Failed to sub balance.", zap.Error(err), zap.String("amount", amount.String())) {
-		return
-	}
-	if _, ok := stateDB.cachedContract[evmAddr]; !ok {
-		stateDB.dirtyAccounts[evmAddr] = struct{}{}
+		return *uint256.MustFromBig(state.Balance)
 	}
 	err = accountutil.StoreAccount(stateDB.sm, addr, state)
 	if stateDB.assertError(err, "Failed to store account.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-		return
+		return *uint256.MustFromBig(state.Balance)
 	}
+	return *uint256.MustFromBig(state.Balance)
 }
 
 // AddBalance adds balance to account
-func (stateDB *StateDBAdapter) AddBalance(evmAddr common.Address, a256 *uint256.Int) {
+func (stateDB *StateDBAdapter) AddBalance(evmAddr common.Address, a256 *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
+	if stateDB.ignoreBalanceChangeTouchAccount && reason == tracing.BalanceChangeTouchAccount {
+		if a256.Sign() != 0 {
+			log.T(stateDB.ctx).Panic("Invalid non-zero amount for touch account.", zap.String("address", evmAddr.Hex()), zap.String("amount", a256.String()))
+		}
+		log.T(stateDB.ctx).Debug("Ignore AddBalance for touch account.", zap.String("address", evmAddr.Hex()))
+		return *common.U2560
+	}
 	amount := a256.ToBig()
 	stateDB.lastAddBalanceAmount.SetUint64(0)
 	if amount.Cmp(big.NewInt(int64(0))) == 0 {
-		return
+		org, err := accountutil.Recorded(stateDB.sm, evmAddr)
+		switch errors.Cause(err) {
+		case nil:
+			return *uint256.MustFromBig(org.Balance)
+		case state.ErrStateNotExist:
+			return *common.U2560
+		default:
+			stateDB.assertError(err, "Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex()))
+			return *common.U2560
+		}
 	}
-	// stateDB.GetBalance(evmAddr)
-	log.T(stateDB.ctx).Debug(fmt.Sprintf("AddBalance %v to %s", amount, evmAddr.Hex()))
+
+	log.T(stateDB.ctx).Debug(fmt.Sprintf("AddBalance %v to %s", a256, evmAddr.Hex()))
 
 	addr, err := address.FromBytes(evmAddr.Bytes())
 	if stateDB.assertError(err, "Failed to convert evm address.", zap.Error(err)) {
-		return
+		return *common.U2560
 	}
 	var (
 		state *state.Account
@@ -358,22 +408,22 @@ func (stateDB *StateDBAdapter) AddBalance(evmAddr common.Address, a256 *uint256.
 	} else {
 		state, err = accountutil.LoadOrCreateAccount(stateDB.sm, addr, stateDB.accountCreationOpts()...)
 		if stateDB.assertError(err, "Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-			return
+			return *common.U2560
 		}
-		stateDB.dirtyAccounts[evmAddr] = struct{}{}
 	}
 	err = state.AddBalance(amount)
 	if stateDB.assertError(err, "Failed to add balance.", zap.Error(err), zap.String("amount", amount.String())) {
-		return
+		return *uint256.MustFromBig(state.Balance)
 	}
 	err = accountutil.StoreAccount(stateDB.sm, addr, state)
 	if stateDB.assertError(err, "Failed to store account.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-		return
+		return *uint256.MustFromBig(state.Balance)
 	} else {
 		// keep a record of latest add balance
 		stateDB.lastAddBalanceAddr = addr.String()
 		stateDB.lastAddBalanceAmount.SetBytes(amount.Bytes())
 	}
+	return *uint256.MustFromBig(state.Balance)
 }
 
 // GetBalance gets the balance of account
@@ -434,7 +484,7 @@ func (stateDB *StateDBAdapter) GetNonce(evmAddr common.Address) uint64 {
 }
 
 // SetNonce sets the nonce of account
-func (stateDB *StateDBAdapter) SetNonce(evmAddr common.Address, nonce uint64) {
+func (stateDB *StateDBAdapter) SetNonce(evmAddr common.Address, nonce uint64, _ tracing.NonceChangeReason) {
 	addr, err := address.FromBytes(evmAddr.Bytes())
 	if stateDB.assertError(err, "Failed to convert evm address.", zap.Error(err)) {
 		return
@@ -457,9 +507,6 @@ func (stateDB *StateDBAdapter) SetNonce(evmAddr common.Address, nonce uint64) {
 			log.T(stateDB.ctx).Panic("Failed to set nonce.", zap.Error(err), zap.String("addr", addr.Hex()), zap.Uint64("pendingNonce", s.PendingNonce()), zap.Uint64("nonce", nonce), zap.String("execution", hex.EncodeToString(stateDB.executionHash[:])))
 			stateDB.logError(err)
 		}
-	}
-	if _, ok := stateDB.cachedContract[evmAddr]; !ok {
-		stateDB.dirtyAccounts[evmAddr] = struct{}{}
 	}
 	err = accountutil.StoreAccount(stateDB.sm, addr, s)
 	stateDB.assertError(err, "Failed to store account.", zap.Error(err), zap.String("address", evmAddr.Hex()))
@@ -489,25 +536,27 @@ func (stateDB *StateDBAdapter) GetRefund() uint64 {
 }
 
 // SelfDestruct kills the contract
-func (stateDB *StateDBAdapter) SelfDestruct(evmAddr common.Address) {
+func (stateDB *StateDBAdapter) SelfDestruct(evmAddr common.Address) uint256.Int {
+	var prevBalance uint256.Int
 	if !stateDB.Exist(evmAddr) {
 		log.T(stateDB.ctx).Debug("Account does not exist.", zap.String("address", evmAddr.Hex()))
-		return
+		return prevBalance
 	}
 	s, err := stateDB.accountState(evmAddr)
 	if stateDB.assertError(err, "Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-		return
+		return prevBalance
 	}
 	// clears the account balance
 	actBalance := new(big.Int).Set(s.Balance)
+	prevBalance.SetFromBig(actBalance)
 	log.T(stateDB.ctx).Info("SelfDestruct contract", zap.String("Balance", actBalance.String()))
 	err = s.SubBalance(s.Balance)
 	if stateDB.assertError(err, "Failed to clear balance.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-		return
+		return prevBalance
 	}
 	_, err = stateDB.sm.PutState(s, protocol.KeyOption(evmAddr[:]))
 	if stateDB.assertError(err, "Failed to kill contract.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
-		return
+		return prevBalance
 	}
 	// before calling SelfDestruct, EVM will transfer the contract's balance to beneficiary
 	// need to create a transaction log on successful SelfDestruct
@@ -515,6 +564,7 @@ func (stateDB *StateDBAdapter) SelfDestruct(evmAddr common.Address) {
 	stateDB.generateSelfDestructTransferLog(from.String(), stateDB.lastAddBalanceAmount.Cmp(actBalance) == 0)
 	// mark it as deleted
 	stateDB.selfDestructed[evmAddr] = struct{}{}
+	return prevBalance
 }
 
 // HasSelfDestructed returns whether the contract has been killed
@@ -523,11 +573,19 @@ func (stateDB *StateDBAdapter) HasSelfDestructed(evmAddr common.Address) bool {
 	return ok
 }
 
-// Selfdestruct6780 implements EIP-6780
-func (stateDB *StateDBAdapter) Selfdestruct6780(evmAddr common.Address) {
+// SelfDestruct6780 implements EIP-6780
+func (stateDB *StateDBAdapter) SelfDestruct6780(evmAddr common.Address) (uint256.Int, bool) {
 	if !stateDB.Exist(evmAddr) {
 		log.T(stateDB.ctx).Debug("Account does not exist.", zap.String("address", evmAddr.Hex()))
-		return
+		return *uint256.NewInt(0), false
+	}
+	state, err := stateDB.accountState(evmAddr)
+	if stateDB.assertError(err, "Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
+		return *common.U2560, false
+	}
+	var balance uint256.Int
+	if state.Balance != nil {
+		balance.SetFromBig(state.Balance)
 	}
 	// opSelfdestruct6780 has already subtracted the contract's balance
 	// so create a transaction log
@@ -536,7 +594,9 @@ func (stateDB *StateDBAdapter) Selfdestruct6780(evmAddr common.Address) {
 	// per EIP-6780, delete the account only if it is created in the same transaction
 	if _, ok := stateDB.createdAccount[evmAddr]; ok {
 		stateDB.selfDestructed[evmAddr] = struct{}{}
+		return balance, true
 	}
+	return balance, false
 }
 
 // SetTransientState sets transient storage for a given account
@@ -563,12 +623,12 @@ func (stateDB *StateDBAdapter) Exist(evmAddr common.Address) bool {
 	if _, ok := stateDB.cachedContract[evmAddr]; ok {
 		return true
 	}
-	recorded, err := accountutil.Recorded(stateDB.sm, addr)
-	if stateDB.assertError(err, "Account does not exist.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
+	_, err = accountutil.Recorded(stateDB.sm, addr)
+	if errors.Is(err, state.ErrStateNotExist) {
+		log.T(stateDB.ctx).Debug("Account does not exist.", zap.String("address", addr.String()))
 		return false
 	}
-	if !recorded {
-		log.T(stateDB.ctx).Debug("Account does not exist.", zap.String("address", addr.String()))
+	if stateDB.assertError(err, "Account does not exist.", zap.Error(err), zap.String("address", evmAddr.Hex())) {
 		return false
 	}
 	return true
@@ -618,23 +678,6 @@ func (stateDB *StateDBAdapter) AddressInAccessList(addr common.Address) bool {
 // SlotInAccessList returns true if the given (address, slot)-tuple is in the access list
 func (stateDB *StateDBAdapter) SlotInAccessList(addr common.Address, slot common.Hash) (addressOk bool, slotOk bool) {
 	return stateDB.accessList.Contains(addr, slot)
-}
-
-// AccessedSlots returns all storage slots accessed during EVM execution.
-// Returns a map of contract address → list of accessed slot hashes.
-func (stateDB *StateDBAdapter) AccessedSlots() map[common.Address][]common.Hash {
-	result := make(map[common.Address][]common.Hash)
-	if stateDB.accessList == nil {
-		return result
-	}
-	for addr, idx := range stateDB.accessList.addresses {
-		if idx >= 0 && idx < len(stateDB.accessList.slots) {
-			for slot := range stateDB.accessList.slots[idx] {
-				result[addr] = append(result[addr], slot)
-			}
-		}
-	}
-	return result
 }
 
 // AddAddressToAccessList adds the given address to the access list. This operation is safe to perform
@@ -828,9 +871,7 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 	}
 	// save a copy of current SelfDestruct accounts
 	sa := make(deleteAccount)
-	for k, v := range stateDB.selfDestructed {
-		sa[k] = v
-	}
+	maps.Copy(sa, stateDB.selfDestructed)
 	stateDB.selfDestructedSnapshot[sn] = sa
 	if !stateDB.fixSnapshotOrder {
 		for _, addr := range stateDB.cachedContractAddrs() {
@@ -840,9 +881,7 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 	stateDB.contractSnapshot[sn] = c
 	// save a copy of preimages
 	p := make(preimageMap)
-	for k, v := range stateDB.preimages {
-		p[k] = v
-	}
+	maps.Copy(p, stateDB.preimages)
 	stateDB.preimageSnapshot[sn] = p
 	// save a copy of access list
 	stateDB.accessListSnapshot[sn] = stateDB.accessList.Copy()
@@ -851,39 +890,38 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 		stateDB.transientStorageSnapshot[sn] = stateDB.transientStorage.Copy()
 		// save a copy of created account map
 		ca := make(createdAccount)
-		for k, v := range stateDB.createdAccount {
-			ca[k] = v
-		}
+		maps.Copy(ca, stateDB.createdAccount)
 		stateDB.createdAccountSnapshot[sn] = ca
 	}
 	return sn
 }
 
+// AccessedSlots returns all storage slots accessed during EVM execution.
+// Returns a map of contract address → list of accessed slot hashes. Used by
+// the ioswarm coordinator (SimulateAndCollectAccessList) to discover which
+// storage slots need to be prefetched for L3/L4 agents.
+func (stateDB *StateDBAdapter) AccessedSlots() map[common.Address][]common.Hash {
+	result := make(map[common.Address][]common.Hash)
+	if stateDB.accessList == nil {
+		return result
+	}
+	for addr, idx := range stateDB.accessList.addresses {
+		if idx >= 0 && idx < len(stateDB.accessList.slots) {
+			for slot := range stateDB.accessList.slots[idx] {
+				result[addr] = append(result[addr], slot)
+			}
+		}
+	}
+	return result
+}
+
 // AddLog adds log whose transaction amount is larger than 0
 func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
-	if c := protocol.GetStateDiffCollectorCtx(stateDB.ctx); c != nil && c.Debug {
-		topic0 := "(none)"
-		if len(evmLog.Topics) > 0 {
-			topic0 = evmLog.Topics[0].Hex()
-		}
-		log.S().Infof("[DEBANK_DBG] STATEDB_ADDLOG addr=%s topic0=%s ntopics=%d data_len=%d",
-			evmLog.Address.Hex(), topic0, len(evmLog.Topics), len(evmLog.Data))
-	}
-	// Unconditional probe: always log AddLog calls for the IIP-13 staking contract
-	// (has no EVM code but appears in receipt.Logs()). Used to discover the caller
-	// path in production mint. Remove once debug is done.
-	if evmLog.Address.Hex() == "0xCCD3d8863D241BcC80f46302310a6d942A90e851" {
-		topic0 := "(none)"
-		if len(evmLog.Topics) > 0 {
-			topic0 = evmLog.Topics[0].Hex()
-		}
-		log.S().Infof("[DEBANK_DBG_PROBE] CCD3d8_ADDLOG height=%d topic0=%s data_len=%d", stateDB.blockHeight, topic0, len(evmLog.Data))
-	}
+	// Fork hook: forward to pipeline OnLog so the iotexRPCTracer can stamp the log into
+	// pendingLogs with frame-level attribution. Hook ctx may be unset (legacy execute path),
+	// in which case this is a no-op. See api/rpc_tracer.go OnLog snapshot logic (P9-1).
 	if hooks := protocol.GetPipelineHooksCtx(stateDB.ctx); hooks != nil && hooks.OnLog != nil {
 		hooks.OnLog(evmLog)
-	}
-	if t, ok := GetTracerCtx(stateDB.ctx); ok && t.OnLog != nil {
-		t.OnLog(evmLog)
 	}
 	log.T(stateDB.ctx).Debug("Called AddLog.", zap.Any("log", evmLog))
 	addr, err := address.FromBytes(evmLog.Address.Bytes())
@@ -896,7 +934,7 @@ func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
 		copy(topic[:], evmTopic.Bytes())
 		topics = append(topics, topic)
 	}
-	if len(topics) > 0 && topics[0] == _inContractTransfer {
+	if topics[0] == _inContractTransfer {
 		if len(topics) != 3 {
 			log.T(stateDB.ctx).Panic("Invalid in contract transfer topics")
 		}
@@ -1055,14 +1093,20 @@ func (stateDB *StateDBAdapter) GetCodeSize(evmAddr common.Address) int {
 }
 
 // SetCode sets contract's code
-func (stateDB *StateDBAdapter) SetCode(evmAddr common.Address, code []byte) {
+func (stateDB *StateDBAdapter) SetCode(evmAddr common.Address, code []byte) []byte {
 	contract, err := stateDB.getContract(evmAddr)
 	if err != nil {
 		log.T(stateDB.ctx).Error("Failed to get contract.", zap.Error(err), zap.String("address", evmAddr.Hex()))
 		stateDB.logError(err)
-		return
+		return nil
+	}
+	prev, err := contract.GetCode()
+	if err != nil && !errors.Is(err, state.ErrStateNotExist) {
+		log.T(stateDB.ctx).Error("Failed to get code.", zap.Error(err), zap.String("address", evmAddr.Hex()))
+		stateDB.logError(err)
 	}
 	contract.SetCode(hash.Hash256b(code), code)
+	return prev
 }
 
 // GetCommittedState gets committed state
@@ -1074,7 +1118,7 @@ func (stateDB *StateDBAdapter) GetCommittedState(evmAddr common.Address, k commo
 		return common.Hash{}
 	}
 	v, err := contract.GetCommittedState(hash.BytesToHash256(k[:]))
-	if err != nil {
+	if err != nil && !errors.Is(err, state.ErrStateNotExist) && !errors.Is(err, trie.ErrNotExist) {
 		log.T(stateDB.ctx).Debug("Failed to get committed state.", zap.Error(err))
 		stateDB.logError(err)
 		return common.Hash{}
@@ -1091,7 +1135,7 @@ func (stateDB *StateDBAdapter) GetState(evmAddr common.Address, k common.Hash) c
 		return common.Hash{}
 	}
 	v, err := contract.GetState(hash.BytesToHash256(k[:]))
-	if err != nil {
+	if err != nil && !errors.Is(err, trie.ErrNotExist) {
 		log.T(stateDB.ctx).Debug("Failed to get state.", zap.Error(err))
 		stateDB.logError(err)
 		return common.Hash{}
@@ -1100,21 +1144,61 @@ func (stateDB *StateDBAdapter) GetState(evmAddr common.Address, k common.Hash) c
 }
 
 // SetState sets state
-func (stateDB *StateDBAdapter) SetState(evmAddr common.Address, k, v common.Hash) {
+func (stateDB *StateDBAdapter) SetState(evmAddr common.Address, k, v common.Hash) common.Hash {
 	contract, err := stateDB.getContract(evmAddr)
 	if err != nil {
 		log.T(stateDB.ctx).Error("Failed to get contract.", zap.Error(err), zap.String("address", evmAddr.Hex()))
 		stateDB.logError(err)
-		return
+		return common.Hash{}
 	}
 	log.T(stateDB.ctx).Debug("Called SetState", log.Hex("addrHash", evmAddr[:]), log.Hex("k", k[:]))
+	prev, err := contract.GetState(hash.BytesToHash256(k[:]))
+	if err != nil && !errors.Is(err, trie.ErrNotExist) && !errors.Is(err, state.ErrStateNotExist) {
+		stateDB.assertError(err, "Failed to get previous state.", zap.Error(err), zap.String("address", evmAddr.Hex()))
+	}
 	err = contract.SetState(hash.BytesToHash256(k[:]), v[:])
 	stateDB.assertError(err, "Failed to set state.", zap.Error(err), zap.String("address", evmAddr.Hex()))
+	return common.BytesToHash(prev)
 }
+
+func (stateDB *StateDBAdapter) GetStorageRoot(evmAddr common.Address) common.Hash {
+	// check the contract cache first for up-to-date Root
+	if contract, ok := stateDB.cachedContract[evmAddr]; ok {
+		return common.BytesToHash(contract.SelfState().Root[:])
+	}
+	// read the account directly without adding to cachedContract, so that
+	// CommitContracts won't write back an unmodified account with a recomputed
+	// (non-zero) empty-trie Root
+	account, err := accountutil.Recorded(stateDB.sm, evmAddr)
+	switch errors.Cause(err) {
+	case nil:
+		return common.BytesToHash(account.Root[:])
+	case state.ErrStateNotExist:
+		return common.Hash{}
+	default:
+		log.T(stateDB.ctx).Error("Failed to get account.", zap.Error(err), zap.String("address", evmAddr.Hex()))
+		stateDB.logError(err)
+		return common.Hash{}
+	}
+}
+
+func (stateDB *StateDBAdapter) PointCache() *utils.PointCache {
+	return nil
+}
+
+func (stateDB *StateDBAdapter) Witness() *stateless.Witness {
+	return nil
+}
+
+func (stateDB *StateDBAdapter) AccessEvents() *ethstate.AccessEvents {
+	return nil
+}
+
+// Finalise must be invoked at the end of a transaction
+func (stateDB *StateDBAdapter) Finalise(bool) {}
 
 // CommitContracts commits contract code to db and update pending contract account changes to trie
 func (stateDB *StateDBAdapter) CommitContracts() error {
-	collector := protocol.GetStateDiffCollectorCtx(stateDB.ctx)
 	contractAddrs := make([]common.Address, 0)
 	for addr := range stateDB.cachedContract {
 		contractAddrs = append(contractAddrs, addr)
@@ -1127,9 +1211,12 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 			continue
 		}
 		contract := stateDB.cachedContract[addr]
-		// pre-commit: collect storage diff and code before Commit() clears dirty tracking
-		if collector != nil {
-			stateDB.collectPreCommitDiff(collector, addr, contract)
+		if stateDB.skipWriteCleanContract && !contract.Dirty() {
+			// a read-only contract (loaded by GetState/GetCommittedState but never
+			// modified by SetState/SetCode) does not need Commit or PutState;
+			// skipping it avoids writing back a stale Root that was recomputed by
+			// Snapshot() on an empty storage trie
+			continue
 		}
 		err := contract.Commit()
 		if stateDB.assertError(err, "failed to commit contract", zap.Error(err), zap.String("address", addr.Hex())) {
@@ -1140,36 +1227,6 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 		if stateDB.assertError(err, "failed to store contract", zap.Error(err), zap.String("address", addr.Hex())) {
 			return errors.Wrap(err, "failed to store contract")
 		}
-		// post-commit: collect account state with updated Root
-		if collector != nil {
-			stateDB.collectAccountState(collector, addr, contract)
-		}
-	}
-	// collect dirty non-contract (EOA) accounts for pipeline state diff
-	if collector != nil && len(stateDB.dirtyAccounts) > 0 {
-		eoaAddrs := make([]common.Address, 0, len(stateDB.dirtyAccounts))
-		for addr := range stateDB.dirtyAccounts {
-			eoaAddrs = append(eoaAddrs, addr)
-		}
-		sort.Slice(eoaAddrs, func(i, j int) bool { return bytes.Compare(eoaAddrs[i][:], eoaAddrs[j][:]) < 0 })
-		for _, addr := range eoaAddrs {
-			acc, err := stateDB.accountState(addr)
-			if err != nil {
-				continue
-			}
-			addrHash := crypto.Keccak256Hash(addr[:])
-			gethAcc := types.StateAccount{
-				Nonce:    acc.PendingNonceConsideringFreshAccount(),
-				Balance:  uint256.MustFromBig(acc.Balance),
-				Root:     common.BytesToHash(acc.Root[:]),
-				CodeHash: acc.CodeHash,
-			}
-			collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
-			if collector.Debug {
-				log.S().Infof("[DEBANK_DBG] COMMIT_EOA_OVERWRITE addr=%x bal=%s nonce=%d (reads sm via accountState)",
-					addr[:], acc.Balance.String(), acc.PendingNonceConsideringFreshAccount())
-			}
-		}
 	}
 	// delete suicided accounts/contract
 	contractAddrs = contractAddrs[:0]
@@ -1179,10 +1236,6 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 	sort.Slice(contractAddrs, func(i, j int) bool { return bytes.Compare(contractAddrs[i][:], contractAddrs[j][:]) < 0 })
 
 	for _, addr := range contractAddrs {
-		if collector != nil {
-			addrHash := crypto.Keccak256Hash(addr[:])
-			collector.Destructs[addrHash] = struct{}{}
-		}
 		_, err := stateDB.sm.DelState(protocol.KeyOption(addr[:]), protocol.ObjectOption(&state.Account{}))
 		if stateDB.assertError(err, "failed to delete SelfDestruct account/contract", zap.Error(err), zap.String("address", addr.Hex())) {
 			return errors.Wrapf(err, "failed to delete SelfDestruct account/contract %x", addr[:])
@@ -1208,219 +1261,6 @@ func (stateDB *StateDBAdapter) CommitContracts() error {
 		}
 	}
 	return nil
-}
-
-// collectPreCommitDiff collects storage diffs and code from a contract before Commit() clears dirty tracking
-func (stateDB *StateDBAdapter) collectPreCommitDiff(collector *protocol.PipelineStateDiffCollector, addr common.Address, c Contract) {
-	addrHash := crypto.Keccak256Hash(addr[:])
-	if inner := getInnerContract(c); inner != nil {
-		// regular *contract / *contractAdapter path
-		// storage diff: committed map keys = modified slots, trie has new values
-		if len(inner.committed) > 0 {
-			storageMap := make(map[common.Hash][]byte, len(inner.committed))
-			for key := range inner.committed {
-				val, _ := inner.trie.Get(key[:])
-				slotHash := crypto.Keccak256Hash(key[:])
-				if len(val) > 0 && !isAllZero(val) {
-					encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
-					storageMap[slotHash] = encoded
-				} else {
-					storageMap[slotHash] = nil
-				}
-			}
-			if existing, ok := collector.Storages[addrHash]; ok {
-				for k, v := range storageMap {
-					existing[k] = v
-				}
-			} else {
-				collector.Storages[addrHash] = storageMap
-			}
-		}
-		// code: dirtyCode means new contract deployment in this tx.
-		// Use keccak256(code) — Account.CodeHash isn't updated until contract.Commit()
-		// runs, which happens AFTER this function.
-		if inner.dirtyCode && len(inner.code) > 0 {
-			codeHash := crypto.Keccak256Hash(inner.code)
-			collector.Codes[codeHash] = common.CopyBytes(inner.code)
-		}
-		return
-	}
-	// contractErigon path (used in trace_debankBlock dryrun replay). The
-	// primary capture of code still happens via StateDiff() -> evmDiffs,
-	// but a pre-Sumatra CREATE was observed losing code through that path
-	// (intra.GetCode returned empty). Treat this branch as the backstop
-	// that writes to collector.Codes directly, mirroring the regular
-	// contract branch above.
-	erigonC, ok := c.(*contractErigon)
-	if !ok {
-		return
-	}
-	if len(erigonC.committed) > 0 {
-		storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
-		for key := range erigonC.committed {
-			val, _ := erigonC.GetState(key)
-			slotHash := crypto.Keccak256Hash(key[:])
-			if len(val) > 0 && !isAllZero(val) {
-				encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
-				storageMap[slotHash] = encoded
-			} else {
-				storageMap[slotHash] = nil
-			}
-		}
-		if existing, ok := collector.Storages[addrHash]; ok {
-			for k, v := range storageMap {
-				existing[k] = v
-			}
-		} else {
-			collector.Storages[addrHash] = storageMap
-		}
-	}
-	if erigonC.dirtyCode {
-		code, _ := erigonC.GetCode()
-		if len(code) > 0 {
-			codeHash := crypto.Keccak256Hash(code)
-			collector.Codes[codeHash] = common.CopyBytes(code)
-		}
-	}
-}
-
-// collectAccountState collects account state after Commit() has updated the storage root
-func (stateDB *StateDBAdapter) collectAccountState(collector *protocol.PipelineStateDiffCollector, addr common.Address, c Contract) {
-	acc := c.SelfState()
-	gethAcc := types.StateAccount{
-		Nonce:    acc.PendingNonceConsideringFreshAccount(),
-		Balance:  uint256.MustFromBig(acc.Balance),
-		Root:     common.BytesToHash(acc.Root[:]),
-		CodeHash: acc.CodeHash,
-	}
-	addrHash := crypto.Keccak256Hash(addr[:])
-	collector.Accounts[addrHash] = types.SlimAccountRLP(gethAcc)
-}
-
-// StateDiff returns per-action state changes for trace_debankBlock RPC.
-// Must be called BEFORE CommitContracts/clear, as it reads from contract.committed and trie.
-func (stateDB *StateDBAdapter) StateDiff() (
-	destructs map[common.Hash]struct{},
-	accounts map[common.Hash][]byte,
-	storages map[common.Hash]map[common.Hash][]byte,
-	codes map[common.Hash][]byte,
-) {
-	destructs = make(map[common.Hash]struct{})
-	accounts = make(map[common.Hash][]byte)
-	storages = make(map[common.Hash]map[common.Hash][]byte)
-	codes = make(map[common.Hash][]byte)
-
-	// destructs
-	for addr := range stateDB.selfDestructed {
-		destructs[crypto.Keccak256Hash(addr[:])] = struct{}{}
-	}
-
-	// contracts: storages + codes + accounts
-	for addr, c := range stateDB.cachedContract {
-		if _, ok := stateDB.selfDestructed[addr]; ok {
-			continue
-		}
-		addrHash := crypto.Keccak256Hash(addr[:])
-		inner := getInnerContract(c)
-		if inner != nil {
-			// storage diffs from committed map (tracks all SetState calls)
-			if len(inner.committed) > 0 {
-				storageMap := make(map[common.Hash][]byte, len(inner.committed))
-				for key := range inner.committed {
-					val, _ := inner.trie.Get(key[:])
-					slotHash := crypto.Keccak256Hash(key[:])
-					if len(val) > 0 && !isAllZero(val) {
-						encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
-						storageMap[slotHash] = encoded
-					} else {
-						storageMap[slotHash] = nil
-					}
-				}
-				storages[addrHash] = storageMap
-			}
-			// new code deployments. Use keccak256(code) — Account.CodeHash is
-			// stale here because StateDiff() runs before CommitContracts()
-			// which is what updates Account.CodeHash.
-			if inner.dirtyCode && len(inner.code) > 0 {
-				codeHash := crypto.Keccak256Hash(inner.code)
-				codes[codeHash] = common.CopyBytes(inner.code)
-			}
-		} else if erigonC, ok := c.(*contractErigon); ok {
-			// Erigon-backed contract (used in trace_debankBlock replay dryrun path)
-			if len(erigonC.committed) > 0 {
-				storageMap := make(map[common.Hash][]byte, len(erigonC.committed))
-				for key := range erigonC.committed {
-					val, _ := erigonC.GetState(key)
-					slotHash := crypto.Keccak256Hash(key[:])
-					if len(val) > 0 && !isAllZero(val) {
-						encoded, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val))
-						storageMap[slotHash] = encoded
-					} else {
-						storageMap[slotHash] = nil
-					}
-				}
-				storages[addrHash] = storageMap
-			}
-			if erigonC.dirtyCode {
-				code, _ := erigonC.GetCode()
-				if len(code) > 0 {
-					codeHash := crypto.Keccak256Hash(code)
-					codes[codeHash] = common.CopyBytes(code)
-				}
-			}
-		}
-		// account state (nonce, balance, root, codehash)
-		acc := c.SelfState()
-		gethAcc := types.StateAccount{
-			Nonce:    acc.PendingNonceConsideringFreshAccount(),
-			Balance:  uint256.MustFromBig(acc.Balance),
-			Root:     common.BytesToHash(acc.Root[:]),
-			CodeHash: acc.CodeHash,
-		}
-		accounts[addrHash] = types.SlimAccountRLP(gethAcc)
-	}
-
-	// non-contract (EOA) accounts modified by EVM
-	for addr := range stateDB.dirtyAccounts {
-		addrHash := crypto.Keccak256Hash(addr[:])
-		if _, exists := accounts[addrHash]; exists {
-			continue
-		}
-		acc, err := stateDB.accountState(addr)
-		if err != nil {
-			continue
-		}
-		gethAcc := types.StateAccount{
-			Nonce:    acc.PendingNonceConsideringFreshAccount(),
-			Balance:  uint256.MustFromBig(acc.Balance),
-			Root:     common.BytesToHash(acc.Root[:]),
-			CodeHash: acc.CodeHash,
-		}
-		accounts[addrHash] = types.SlimAccountRLP(gethAcc)
-	}
-	return
-}
-
-// getInnerContract extracts the underlying *contract from a Contract interface
-func getInnerContract(c Contract) *contract {
-	switch ct := c.(type) {
-	case *contract:
-		return ct
-	case *contractAdapter:
-		if inner, ok := ct.Contract.(*contract); ok {
-			return inner
-		}
-	}
-	return nil
-}
-
-func isAllZero(b []byte) bool {
-	for _, v := range b {
-		if v != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // getContract returns the contract of addr
@@ -1461,7 +1301,6 @@ func (stateDB *StateDBAdapter) clear() {
 	stateDB.txLogsSnapshot = make(map[int]int)
 	stateDB.logs = []*action.Log{}
 	stateDB.transactionLogs = []*action.TransactionLog{}
-	stateDB.dirtyAccounts = make(map[common.Address]struct{})
 	if stateDB.enableCancun {
 		stateDB.transientStorage = newTransientStorage()
 		stateDB.transientStorageSnapshot = make(map[int]transientStorage)
