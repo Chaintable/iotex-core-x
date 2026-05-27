@@ -174,17 +174,18 @@ func (ws *workingSet) runAction(
 				from = common.BytesToAddress(sender.Bytes())
 			}
 			blkCtx := protocol.MustGetBlockCtx(ctx)
-			// R2: v1.15.11 OnTxStart takes *tracing.VMContext as first arg.
-			// Pipeline's PipelineTracer.OnTxStart does not introspect StateDB; iotex's Rolldpos
-			// consensus has no PoW Random, so Random/StateDB are nil. Field names are explicit
-			// to make missing-field reviewer audits easy (see doc D2/D3).
+			// R2 / HIGH-1: v1.15.11 OnTxStart takes *tracing.VMContext as first arg.
+			// StateDB must wire a real tracing.StateDB adapter; iotex's inner
+			// PipelineTracer does not introspect it, but generic tracers (StructLogger
+			// / prestateTracer) cache env at OnTxStart and later deref env.StateDB —
+			// nil would panic. Random nil because Rolldpos has no PoW randomness.
 			vmCtx := &tracing.VMContext{
 				Coinbase:    common.BytesToAddress(blkCtx.Producer.Bytes()),
 				BlockNumber: new(big.Int).SetUint64(blkCtx.BlockHeight),
 				Time:        uint64(blkCtx.BlockTimeStamp.Unix()),
 				Random:      nil,
 				BaseFee:     blkCtx.BaseFee,
-				StateDB:     nil,
+				StateDB:     evm.PrepareTracingStateDB(ctx, ws),
 			}
 			hooks.OnTxStart(vmCtx, ethTx, from)
 			startedTxHook = true

@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 
 	"github.com/iotexproject/iotex-address/address"
 
@@ -22,6 +23,47 @@ import (
 	"github.com/iotexproject/iotex-core/v2/action/protocol"
 	"github.com/iotexproject/iotex-core/v2/pkg/log"
 )
+
+// Compile-time guarantees that the three EVM stateDB adapter types satisfy
+// v1.15.11 tracing.StateDB. Required so that VMContext.StateDB can be wired
+// at OnTxStart fire points (see HIGH-1 report); without these, v1.15.11
+// generic tracers (StructLogger / prestateTracer) hit nil-deref on
+// env.StateDB.GetRefund() / GetNonce() etc.
+//
+// tracing.StateDB is a strict subset of vm.StateDB (8 methods: GetBalance /
+// GetNonce / GetCode / GetCodeHash / GetState / GetTransientState / Exist /
+// GetRefund), all of which *StateDBAdapter already implements; the Erigon
+// adapters inherit them via embedding.
+var (
+	_ tracing.StateDB = (*StateDBAdapter)(nil)
+	_ tracing.StateDB = (*ErigonStateDBAdapter)(nil)
+	_ tracing.StateDB = (*ErigonStateDBAdapterDryrun)(nil)
+)
+
+// PrepareTracingStateDB builds a fresh tracing.StateDB adapter over the given
+// workingSet (sm). Used at OnTxStart fire points (state/factory/workingset.go
+// runAction + this package's TraceStart) to populate VMContext.StateDB so
+// generic v1.15.11 tracers don't nil-deref. Returns nil on error — caller
+// degrades to nil StateDB which is the prior buggy behavior, but keeps the
+// path running (logged so panic-on-deref still surfaces via the test failure
+// rather than silently going wrong).
+//
+// The returned StateDB shadows the one EVM constructs internally during
+// execution; both wrap the same workingSet so they observe identical state.
+// Slight allocation overhead per fire (one adapter struct + maps); not on the
+// EVM hot path.
+func PrepareTracingStateDB(ctx context.Context, sm protocol.StateManager) tracing.StateDB {
+	sdb, err := prepareStateDB(ctx, sm)
+	if err != nil {
+		log.S().Warn("PrepareTracingStateDB: prepareStateDB failed, VMContext.StateDB will be nil", zap.Error(err))
+		return nil
+	}
+	if adapter, ok := sdb.(tracing.StateDB); ok {
+		return adapter
+	}
+	log.S().Warn("PrepareTracingStateDB: prepareStateDB result does not satisfy tracing.StateDB (impossible per compile-time assertions); returning nil")
+	return nil
+}
 
 // TraceCleanup is the deferred closure returned by TraceStart. The caller MUST
 // invoke it exactly once (typically via defer) to keep the underlying tracer's
@@ -69,7 +111,13 @@ func TraceStart(ctx context.Context, ws protocol.StateManager, elp action.TxData
 		Time:        uint64(blkCtx.BlockTimeStamp.Unix()),
 		Random:      nil, // Rolldpos: no PoW Random
 		BaseFee:     blkCtx.BaseFee,
-		StateDB:     nil, // pipeline RPCTracer does not introspect
+		// StateDB: wire a real tracing.StateDB adapter wrapping workingSet (HIGH-1).
+		// iotex's inner PipelineTracer / iotexRPCTracer don't read env.StateDB,
+		// but v1.15.11 generic tracers (StructLogger / prestateTracer / native
+		// prestateTracer) cache env at OnTxStart then deref env.StateDB.GetRefund()
+		// / GetNonce() in later hooks — nil would panic. The adapter shadows EVM's
+		// own internal stateDB; both wrap the same ws so behavior is consistent.
+		StateDB: PrepareTracingStateDB(ctx, ws),
 	}
 
 	actCtx := protocol.MustGetActionCtx(ctx)
