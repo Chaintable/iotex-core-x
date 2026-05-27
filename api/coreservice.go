@@ -2645,33 +2645,23 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer.Hooks()})
 	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
 		CaptureTx: func(retval []byte, receipt *action.Receipt) {
+			// CaptureTx fires BEFORE evm/tracer.go's convertReceipt + OnTxEnd
+			// (see cleanup closure in tracer.go), so currentIdx still points at
+			// the action currently being processed — no -1 adjustment needed.
 			idx := rpcTracer.currentIdx
-			if idx > 0 {
-				idx-- // currentIdx was already incremented by CaptureTxEnd
+			if idx < 0 || idx >= len(blk.Actions) {
+				return
 			}
-			if idx < len(blk.Actions) {
-				selp := blk.Actions[idx]
-				// Capture replay status for divergence detection BEFORE the early return below.
-				// Non-EVM actions (GrantReward / PutPollResult / ...) still produce a receipt
-				// but we don't run them through OnTxEnd; the status is still meaningful.
-				if idx >= 0 && idx < len(replayStatuses) {
-					replayStatuses[idx] = receipt.Status
-				}
-				// non-eth action (GrantReward / PutPollResult / ...) has no paired
-				// inner.OnTxStart (rpc_tracer.CaptureTxStart returns early when
-				// selp.ToEthTx fails). Skip OnTxEnd so the pipeline tracer sees
-				// balanced OnTxStart/OnTxEnd pairs.
-				if _, err := selp.ToEthTx(); err != nil {
-					return
-				}
-				// set TxIndex before converting — updateReceiptIndex hasn't run yet
-				receipt.TxIndex = uint32(idx)
-				gethReceipt := convertActionReceiptToGethReceipt(receipt, selp)
-				if gethReceipt != nil {
-					gethReceipt.TransactionIndex = uint(idx)
-					rpcTracer.OnTxEnd(gethReceipt, nil)
-				}
+			if idx < len(replayStatuses) {
+				replayStatuses[idx] = receipt.Status
 			}
+			// Populate TxIndex on the iotex receipt. The downstream
+			// convertReceipt() in evm/tracer.go maps this onto the geth
+			// receipt's TransactionIndex, which pipeline's
+			// BuildPipelineTransaction then writes into block_file.txs[*].idx.
+			// updateReceiptIndex normally fills this at block-commit time but
+			// the trace_debankBlock dryrun path never commits.
+			receipt.TxIndex = uint32(idx)
 		},
 		// EmitTransferLogs fires BEFORE CaptureTxEnd so the logs get into callstack[top].Logs
 		// and are picked up by callTracer.addTraceAndLog when OnTxEnd runs.

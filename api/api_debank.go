@@ -209,18 +209,6 @@ func mergeStateDiffs(diffs []perActionStateDiff) (
 	return
 }
 
-// convertToGethReceipt wraps blockchain.ConvertToGethReceipt with baseFee for RPC tracer.
-func convertActionReceiptToGethReceipt(receipt *action.Receipt, selp *action.SealedEnvelope) *types.Receipt {
-	gethReceipt := blockchain.ConvertToGethReceipt(receipt)
-	if gethReceipt == nil {
-		return nil
-	}
-	// set TxHash from the action's eth tx hash
-	if ethTx, err := selp.ToEthTx(); err == nil {
-		gethReceipt.TxHash = ethTx.Hash()
-	}
-	return gethReceipt
-}
 
 // emitTransferLogsAsEvents pushes receipt logs through the tracer so they
 // appear in block_file.events:

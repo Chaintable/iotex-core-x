@@ -183,8 +183,22 @@ func TraceStart(ctx context.Context, ws protocol.StateManager, elp action.TxData
 	return func(receipt *action.Receipt) {
 		if receipt != nil {
 			// Success path.
-			gethReceipt := convertReceipt(receipt)
+			//
+			// CaptureTx fires BEFORE convertReceipt + OnTxEnd so the caller has
+			// a chance to populate receipt.TxIndex (and any other index-derived
+			// fields) on the iotex receipt. Downstream convertReceipt then maps
+			// those fields onto the geth receipt, and pipeline's
+			// BuildPipelineTransaction (used by OnTxEnd) writes them into
+			// block_file.txs[*]. Without this ordering, every tx in the
+			// pipeline output shows TransactionIndex (json: "idx") = 0 because
+			// receipt.TxIndex stays at the zero value until the per-action
+			// updateReceiptIndex pass runs at block-commit time — a pass that
+			// never runs in the trace_debankBlock dryrun path.
 			output := receipt.Output
+			if t, ok := GetTracerCtx(ctx); ok && t.CaptureTx != nil {
+				t.CaptureTx(output, receipt)
+			}
+			gethReceipt := convertReceipt(receipt)
 			if t, ok := GetTracerCtx(ctx); ok && t.EmitTransferLogs != nil {
 				// For non-Execution actions, receipt.Logs() never reached the
 				// tracer via OnLog (handler does not go through EVM). Re-emit
@@ -200,9 +214,6 @@ func TraceStart(ctx context.Context, ws protocol.StateManager, elp action.TxData
 			}
 			if hooks.OnTxEnd != nil {
 				hooks.OnTxEnd(gethReceipt, nil)
-			}
-			if t, ok := GetTracerCtx(ctx); ok && t.CaptureTx != nil {
-				t.CaptureTx(output, receipt)
 			}
 			return
 		}
