@@ -1,7 +1,9 @@
 package erigonstore
 
 import (
+	"bytes"
 	"context"
+	"sort"
 
 	erigonChangeset "github.com/erigontech/erigon/common/changeset"
 	erigonComm "github.com/erigontech/erigon-lib/common"
@@ -98,6 +100,15 @@ func (r *CanonicalBlockReader) ChangedAccounts(height uint64) ([]common.Address,
 	for a := range seen {
 		out = append(out, a)
 	}
+	// Map iteration order in Go is unspecified; downstream consumers
+	// (buildCanonicalDiffBuckets) append entries to BlockStorageDiff in the
+	// returned order, and the resulting RLP encoding is order-sensitive. Two
+	// writers running the same build but different binary instances will
+	// otherwise produce byte-divergent state_diff hex for identical chain
+	// state. Sort by raw address bytes to make the output deterministic.
+	sort.Slice(out, func(i, j int) bool {
+		return bytes.Compare(out[i][:], out[j][:]) < 0
+	})
 	return out, nil
 }
 
@@ -128,6 +139,19 @@ func (r *CanonicalBlockReader) ChangedStorages(height uint64) ([]StorageKey, err
 	for sk := range seen {
 		out = append(out, sk)
 	}
+	// See ChangedAccounts for the rationale on deterministic ordering. Sort key
+	// is (Addr, Incarnation, Slot) — Addr first so all slots of a given
+	// contract group together (matches downstream storageByAddr grouping in
+	// buildCanonicalDiffBuckets), Slot last as the per-contract tiebreak.
+	sort.Slice(out, func(i, j int) bool {
+		if c := bytes.Compare(out[i].Addr[:], out[j].Addr[:]); c != 0 {
+			return c < 0
+		}
+		if out[i].Incarnation != out[j].Incarnation {
+			return out[i].Incarnation < out[j].Incarnation
+		}
+		return bytes.Compare(out[i].Slot[:], out[j].Slot[:]) < 0
+	})
 	return out, nil
 }
 

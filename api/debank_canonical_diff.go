@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"sort"
 	"strings"
 
 	ptypes "github.com/Chaintable/pipeline/types"
@@ -219,7 +221,19 @@ func buildCanonicalDiffBuckets(
 		}
 		storageByAddr[sk.Addr] = append(storageByAddr[sk.Addr], slotEntry{slot: sk.Slot, value: v})
 	}
-	for addr, entries := range storageByAddr {
+	// Iterate storageByAddr in deterministic order. Go map iteration is
+	// unspecified; relying on it here makes StorageDiff entry order vary
+	// between writer binaries even when the underlying chain state is
+	// identical, which breaks byte-level state_diff RLP reconciliation.
+	sortedAddrs := make([]common.Address, 0, len(storageByAddr))
+	for addr := range storageByAddr {
+		sortedAddrs = append(sortedAddrs, addr)
+	}
+	sort.Slice(sortedAddrs, func(i, j int) bool {
+		return bytes.Compare(sortedAddrs[i][:], sortedAddrs[j][:]) < 0
+	})
+	for _, addr := range sortedAddrs {
+		entries := storageByAddr[addr]
 		addrHash := crypto.Keccak256Hash(addr[:])
 		values := make([]ptypes.IndexValuePair, 0, len(entries))
 		for _, e := range entries {
@@ -235,7 +249,15 @@ func buildCanonicalDiffBuckets(
 	}
 
 	// ─── Codes → NewCodes ────────────────────────────────────────────────────
+	// Same deterministic-order requirement as StorageDiff above.
+	sortedCodeHashes := make([]common.Hash, 0, len(newCodeHashes))
 	for codeHash := range newCodeHashes {
+		sortedCodeHashes = append(sortedCodeHashes, codeHash)
+	}
+	sort.Slice(sortedCodeHashes, func(i, j int) bool {
+		return bytes.Compare(sortedCodeHashes[i][:], sortedCodeHashes[j][:]) < 0
+	})
+	for _, codeHash := range sortedCodeHashes {
 		code, err := rd.CodeByHash(codeHash)
 		if err != nil {
 			return nil, errors.Wrapf(err, "CodeByHash(%s)", codeHash.Hex())
