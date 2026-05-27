@@ -4,6 +4,7 @@ import (
 	"math/big"
 
 	erigonComm "github.com/erigontech/erigon-lib/common"
+	erigonAcc "github.com/erigontech/erigon/core/types/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
@@ -103,7 +104,20 @@ func (as *accountStorage) Load(key []byte, obj any) error {
 	default:
 		return errors.Errorf("unknown account type %v for address %x", pbAcc.Type, addr.Bytes())
 	}
-	pbAcc.CodeHash = as.backend.intraBlockState.GetCodeHash(addr).Bytes()
+	// Only set CodeHash for actual contracts. Erigon returns emptyCodeHash
+	// (keccak256("")) for EOAs — setting it unconditionally makes IsContract()
+	// return true for all EOAs, breaking native-transfer handling in the replay
+	// path. fork commit 068b60d93 added this guard; upstream PR #4754
+	// (v2.4.0 a70ad6bf9 "erigon storage optimization for candidates and reward")
+	// removed it. v2.4.1 merge took upstream wholesale and lost the guard —
+	// docs/v2.4.1-plan/4-iotex-core.md §3.5 Step 3.5 and 5-code-review.md row 4
+	// mis-classified it as "upstream-equivalent, no reapply needed"; the kava-1
+	// double-writer reconciliation surfaced the regression as ~3454 state_diff
+	// mismatches per startup-20 run (1645 new_accounts + 1809 storages, almost
+	// every block — see 6-2-test-report.md §3.3 item 3-4 / §4.2 first row).
+	if ch := as.backend.intraBlockState.GetCodeHash(addr); !erigonAcc.IsEmptyCodeHash(ch) {
+		pbAcc.CodeHash = ch.Bytes()
+	}
 	acct.FromProto(pbAcc)
 	return nil
 }
