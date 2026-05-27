@@ -2643,6 +2643,17 @@ func (core *coreService) debankBlockImpl(ctx context.Context, height uint64, deb
 	// natively in OnEnter/OnExit so nested ExecuteContract no longer
 	// double-fires the root frame.
 	ctx = protocol.WithVMConfigCtx(ctx, vm.Config{Tracer: rpcTracer.Hooks()})
+	// Wire iotexRPCTracer hooks into PipelineHooksCtx so the fork's
+	// StateDBAdapter.AddLog can forward each EVM LOG opcode emission to
+	// iotexRPCTracer.OnLog. v1.15.11's hooked stateDB pattern is bypassed by
+	// the fork (StateDBAdapter is custom, not hookedStateDB), so AddLog
+	// explicitly reads protocol.GetPipelineHooksCtx and calls hooks.OnLog
+	// from there. Without this wire, OnLog never fires during replay,
+	// pendingLogs stays empty, flushPendingLogs is a no-op, no InsertLog
+	// gets called, and buildCanonicalEvents can find no per-event binding —
+	// every receipt log falls back to the tx's root_trace_id as parent.
+	// docs/v2.4.1-plan/6-2-test-report.md §3.3 item 5 (events[*].pos_in_parent_trace 420).
+	ctx = protocol.WithPipelineHooksCtx(ctx, rpcTracer.Hooks())
 	ctx = evm.WithTracerCtx(ctx, evm.TracerContext{
 		CaptureTx: func(retval []byte, receipt *action.Receipt) {
 			// CaptureTx fires BEFORE evm/tracer.go's convertReceipt + OnTxEnd
