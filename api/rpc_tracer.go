@@ -269,6 +269,36 @@ func (t *iotexRPCTracer) AdvanceIdx() {
 // lifecycle is out of sync — panic so the violation is loud (matches inner
 // callTracer's behavior). [P9-1, P9-4]
 func (t *iotexRPCTracer) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+	// EVM `depth` is per-EVM-instance: every freshly constructed evm.EVM
+	// (e.g. each ExecuteContract call) starts at depth=0. When an iotex
+	// non-Execution handler (StakeCreate / StakeDeposit / similar staking
+	// actions that internally invoke ExecuteContract) runs inside an action
+	// whose root frame was already opened by evm/tracer.go's manual
+	// OnEnter(0) fire, the inner EVM's depth=0 OnEnter shows up here AS A
+	// NESTED RE-ENTRY. Without translation, the second OnEnter(0) resets
+	// fork's parallel stack/path, AND inner callTracer appends a second
+	// root frame — leaving callstack = [root1, root2_with_subcalls]. At
+	// OnTxEnd time, callTracer.OnTxEnd's `if len(callstack) == 1` guard
+	// fails (len==2), so the entire trace tree + attributed events get
+	// dropped — every log on this tx falls back to root_trace_id, and the
+	// tx's traces / events disappear from BlockFile. baseline v2.3.8
+	// handled this via NewTracerWrapper which translated nested CaptureStart
+	// to CaptureEnter; the v2.4.1 merge dropped the wrapper assuming v1.15.11
+	// depth-passing was sufficient, but depth is per-instance, not logical.
+	//
+	// Translate by parallel-stack: if captureStarted is already true and
+	// stack has the root frame, treat this OnEnter(0) as a logical sub-frame
+	// — push, forward to inner with logical_depth = len(stack)-1. The first
+	// (top-level) OnEnter(0) for each iotex action still goes through the
+	// reset branch below as before.
+	if depth == 0 && t.captureStarted && len(t.stack) > 0 {
+		parent := &t.stack[len(t.stack)-1]
+		t.path = append(t.path, parent.childCount)
+		parent.childCount++
+		t.stack = append(t.stack, frameCtx{})
+		t.inner.OnEnter(len(t.stack)-1, typ, from, to, input, gas, value)
+		return
+	}
 	if depth == 0 {
 		t.captureStarted = true
 		t.stack = append(t.stack[:0], frameCtx{})
@@ -285,7 +315,10 @@ func (t *iotexRPCTracer) OnEnter(depth int, typ byte, from common.Address, to co
 	t.path = append(t.path, parent.childCount)
 	parent.childCount++
 	t.stack = append(t.stack, frameCtx{})
-	t.inner.OnEnter(depth, typ, from, to, input, gas, value)
+	// Forward with logical depth (relative to outermost iotex-action frame),
+	// not the per-instance EVM depth. This keeps the inner callTracer's
+	// callstack growth monotonic when we have nested re-entries above.
+	t.inner.OnEnter(len(t.stack)-1, typ, from, to, input, gas, value)
 }
 
 // OnExit handles both the root frame (depth=0) and sub-frames (depth>0).
@@ -300,15 +333,24 @@ func (t *iotexRPCTracer) OnEnter(depth int, typ byte, from common.Address, to co
 // inform inner callTracer of the new top frame's parent.logCount (the buffered
 // OnLog count not yet inserted via flushPendingLogs). [P9-3, P9-4]
 func (t *iotexRPCTracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
-	if depth == 0 {
-		t.captureStarted = false
-		t.inner.OnExit(depth, output, gasUsed, err, reverted)
-		return
-	}
-	if len(t.stack) <= 1 {
+	// Mirror OnEnter's logical-depth translation: decide outermost vs sub-frame
+	// by parallel stack length, NOT by the EVM-supplied physical depth (which
+	// is per-EVM-instance and lies during nested re-entries — see OnEnter).
+	if len(t.stack) == 0 {
 		log.L().Panic("[iotexRPCTracer] OnExit with no sub-frame — stack underflow",
 			zap.Int("stackLen", len(t.stack)))
 	}
+	if len(t.stack) == 1 {
+		// Outermost root frame exit. Clear captureStarted but do NOT pop the
+		// root — EmitTransferLog runs in the cleanup-closure window
+		// (OnExit(0) -> EmitTransferLogs -> OnTxEnd) and needs an active root
+		// entry to snapshot trace_address=[] / position. The next action's
+		// OnEnter(0) reset branch handles re-init.
+		t.captureStarted = false
+		t.inner.OnExit(0, output, gasUsed, err, reverted)
+		return
+	}
+	// Sub-frame exit (logical depth > 0). Pop our parallel stack.
 	if len(t.path) != len(t.stack)-1 {
 		log.L().Panic("[iotexRPCTracer] OnExit invariant: len(path) != len(stack)-1",
 			zap.Int("stackLen", len(t.stack)), zap.Int("pathLen", len(t.path)))
@@ -322,7 +364,10 @@ func (t *iotexRPCTracer) OnExit(depth int, output []byte, gasUsed uint64, err er
 	// == 0, colliding with the pos values snapshotForLog already assigned.
 	parentLogCount := t.stack[len(t.stack)-1].logCount
 	t.inner.SetPendingLogsOnTopParent(int(parentLogCount))
-	t.inner.OnExit(depth, output, gasUsed, err, reverted)
+	// Forward with logical depth = stack length after pop, so the inner
+	// callTracer's pop matches our sub-frame pop count one-for-one — even
+	// when EVM physical depth reset to 0 mid-action via a nested EVM call.
+	t.inner.OnExit(len(t.stack), output, gasUsed, err, reverted)
 }
 
 // OnLog buffers logs emitted during EVM execution along with the originating

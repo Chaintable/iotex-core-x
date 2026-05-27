@@ -295,12 +295,31 @@ func TestIotexRPCTracerStackAndSnapshot(t *testing.T) {
 			"position = root.childCount(1) + root.logCount-before(1) = 2")
 	})
 
-	t.Run("CaptureExit on root panics (invariant: must have sub-frame)", func(t *testing.T) {
+	t.Run("CaptureExit on root finalizes (logical-depth translation)", func(t *testing.T) {
+		// With nested-re-entry support, len(stack)==1 means the outermost
+		// iotex-action root frame is closing — that's a legitimate
+		// CaptureEnd-style finalize, not a stack underflow. captureStarted
+		// flips to false; the root frame is intentionally not popped so
+		// EmitTransferLog can still snapshot trace_address=[] in the
+		// cleanup-closure window. Only EMPTY stack (no openTracer call)
+		// is a real lifecycle violation — that case is exercised by
+		// "CaptureExit on empty stack panics" below.
 		tr := openTracer()
-		// only root in stack → CaptureExit is an upstream lifecycle violation
+		require.True(t, tr.captureStarted)
+		require.Len(t, tr.stack, 1)
+		require.NotPanics(t, func() {
+			tr.CaptureExit(nil, 0, nil)
+		})
+		require.False(t, tr.captureStarted, "captureStarted clears on outermost root exit")
+		require.Len(t, tr.stack, 1, "root frame is not popped (preserved for EmitTransferLog)")
+	})
+
+	t.Run("CaptureExit on empty stack panics (invariant: stack underflow)", func(t *testing.T) {
+		tr := newIotexRPCTracer(1)
+		// no CaptureStart fired → stack is empty
 		require.Panics(t, func() {
 			tr.CaptureExit(nil, 0, nil)
-		}, "CaptureExit with no sub-frame must panic, not silently no-op")
+		}, "CaptureExit before CaptureStart must panic")
 	})
 
 	t.Run("CaptureEnter on empty stack panics (invariant: CaptureStart must precede)", func(t *testing.T) {
