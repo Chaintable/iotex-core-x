@@ -270,6 +270,11 @@ func (t *iotexRPCTracer) AdvanceIdx() {
 // callTracer's behavior). [P9-1, P9-4]
 func (t *iotexRPCTracer) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 	if depth == 0 {
+		log.L().Info("[DBG-onEnter0]",
+			zap.Int("idx", t.currentIdx),
+			zap.Int("stackLenBefore", len(t.stack)),
+			zap.Int("pathLenBefore", len(t.path)),
+			zap.String("from", from.Hex()), zap.String("to", to.Hex()))
 		t.captureStarted = true
 		t.stack = append(t.stack[:0], frameCtx{})
 		t.path = t.path[:0]
@@ -285,6 +290,13 @@ func (t *iotexRPCTracer) OnEnter(depth int, typ byte, from common.Address, to co
 	t.path = append(t.path, parent.childCount)
 	parent.childCount++
 	t.stack = append(t.stack, frameCtx{})
+	log.L().Info("[DBG-onEnterSub]",
+		zap.Int("idx", t.currentIdx),
+		zap.Int("depth", depth),
+		zap.Int("stackLen", len(t.stack)),
+		zap.Int("pathLen", len(t.path)),
+		zap.Int64s("path", t.path),
+		zap.String("to", to.Hex()))
 	t.inner.OnEnter(depth, typ, from, to, input, gas, value)
 }
 
@@ -301,6 +313,11 @@ func (t *iotexRPCTracer) OnEnter(depth int, typ byte, from common.Address, to co
 // OnLog count not yet inserted via flushPendingLogs). [P9-3, P9-4]
 func (t *iotexRPCTracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
 	if depth == 0 {
+		log.L().Info("[DBG-onExit0]",
+			zap.Int("idx", t.currentIdx),
+			zap.Int("stackLen", len(t.stack)),
+			zap.Int("pathLen", len(t.path)),
+			zap.Bool("reverted", reverted))
 		t.captureStarted = false
 		t.inner.OnExit(depth, output, gasUsed, err, reverted)
 		return
@@ -339,6 +356,14 @@ func (t *iotexRPCTracer) OnExit(depth int, output []byte, gasUsed uint64, err er
 //     InTxLogIdx away from receipt-side iteration order, breaking
 //     canonical-events rebuild's (txID, inTxIdx) binding. [P9-2]
 func (t *iotexRPCTracer) OnLog(l *types.Log) {
+	log.L().Info("[DBG-onLog]",
+		zap.Int("idx", t.currentIdx),
+		zap.Bool("captureStarted", t.captureStarted),
+		zap.Int("stackLen", len(t.stack)),
+		zap.Int("pathLen", len(t.path)),
+		zap.Int64s("path", t.path),
+		zap.String("addr", l.Address.Hex()),
+		zap.Int("nTopics", len(l.Topics)))
 	if !t.captureStarted {
 		return
 	}
