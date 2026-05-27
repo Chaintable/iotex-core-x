@@ -244,22 +244,25 @@ func (ws *workingSet) runAction(
 	if collector != nil {
 		collectorSnap = collector.Snapshot()
 	}
-	// System actions (e.g. GrantReward) are implementation details and must not
-	// appear in block-level traces (debug_traceBlock*). Skip TraceStart/TraceEnd
-	// for them so CaptureTx is never called on their behalf.
-	isSystemAct := action.IsSystemAction(selp)
 	// TraceStart returns a cleanup closure that MUST run exactly once per
 	// CaptureTxStart to keep the tracer frame-balanced. We defer it here and
 	// pass the named `receipt` and `err` return values — the closure branches
 	// on receipt==nil to run either the full end-of-action sequence or the
 	// minimal frame-close sequence. See TraceCleanup's docstring.
-	var traceCleanup evm.TraceCleanup
-	var traceErr error
-	if !isSystemAct {
-		traceCleanup, traceErr = evm.TraceStart(ctx, ws, selp.Envelope)
-		if traceErr != nil {
-			log.L().Error("failed to start tracing EVM execution", zap.Error(traceErr))
-		}
+	//
+	// System actions (GrantReward / PutPollResult / ScheduleCandidateDeactivation)
+	// also go through TraceStart for trace_debankBlock parity: baseline v2.3.8
+	// wrapped them as synthetic fake-tx (to = rewarding-pool eth address,
+	// gas = 0) + a single fake root-trace frame so leafage / DeBank pipelines
+	// could see the action in BlockFile.Txs / Traces. The earlier v2.4.1 merge
+	// inserted an `if !isSystemAct` guard here to hide them from debug_traceBlock,
+	// but that also hid them from trace_debankBlock — the kava-1 double-writer
+	// reconciliation reported 60 mismatches/20 blocks (every block, traces.length
+	// + txs.length + validation_hash each off by 1). docs/v2.4.1-plan/6-2-test-
+	// report.md §3.3 last residue.
+	traceCleanup, traceErr := evm.TraceStart(ctx, ws, selp.Envelope)
+	if traceErr != nil {
+		log.L().Error("failed to start tracing EVM execution", zap.Error(traceErr))
 	}
 	defer func() {
 		if traceErr == nil && traceCleanup != nil {
