@@ -9,7 +9,6 @@ import (
 	"context"
 	"math/big"
 
-	erigonstate "github.com/erigontech/erigon/core/state"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -286,20 +285,16 @@ func convertReceipt(receipt *action.Receipt) *types.Receipt {
 }
 
 func newEVM(ctx context.Context, sm protocol.StateManager, execution action.TxData) (*vm.EVM, error) {
-	var stateDB stateDB
+	// v2.4.1 upstream prepareStateDB (evm.go:488) already wraps Erigon
+	// (dryrun -> *ErigonStateDBAdapterDryrun, normal -> *ErigonStateDBAdapter).
+	// Fork v2.3.8 prepareStateDB returned bare *StateDBAdapter so the original
+	// newEVM here had to wrap Erigon a second time; with v2.4.1 that becomes a
+	// double-wrap and the cast stateDB.(*StateDBAdapter) panics because stateDB
+	// is already the Erigon dryrun wrapper. Removing the redundant block fixes
+	// the trace_debankBlock dryrun panic (see docs/v2.4.1-plan/6-2-test-report.md).
 	stateDB, err := prepareStateDB(ctx, sm)
 	if err != nil {
 		return nil, err
-	}
-	if erigonsm, ok := sm.(interface {
-		Erigon() (*erigonstate.IntraBlockState, bool)
-	}); ok {
-		if in, dryrun := erigonsm.Erigon(); in != nil {
-			if !dryrun {
-				log.S().Panic("should not happen, use dryrun instead")
-			}
-			stateDB = NewErigonStateDBAdapterDryrun(stateDB.(*StateDBAdapter), in)
-		}
 	}
 	evmParams, err := newParams(ctx, execution)
 	if err != nil {
