@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
-  IMAGE: blockchain/iotex-x
+  REGISTRY: public.ecr.aws/b2h7a5c4/chaintable
+  IMAGE: iotex-writer
   DOCKERFILE: Dockerfile.debank
-  AWS_REGION: ap-northeast-1
+  AWS_REGION: us-east-1
 
 jobs:
   build-artifacts:
@@ -18,6 +18,9 @@ jobs:
       matrix:
         arch: [amd64]
     runs-on: [self-hosted, "${{ matrix.arch }}"]
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -35,13 +38,16 @@ jobs:
           echo "REVISION=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
 
       - name: Build image and push to ECR
         uses: docker/build-push-action@v5
