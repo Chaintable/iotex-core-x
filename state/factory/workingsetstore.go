@@ -220,8 +220,7 @@ func (store *stateDBWorkingSetStore) ErigonStore() (any, error) {
 }
 
 // CaptureWriteQueue returns a snapshot of all entries in the write queue.
-// Must be called BEFORE Commit() which flushes and clears the buffer. Fork-only
-// hook (v2.3.8 ioSwarm) — drives state-diff broadcasting via StateDiffCallback.
+// Must be called BEFORE Commit() which flushes and clears the buffer.
 func (store *stateDBWorkingSetStore) CaptureWriteQueue() []WriteQueueEntry {
 	kvb := store.flusher.KVStoreWithBuffer()
 	size := kvb.Size()
@@ -241,8 +240,7 @@ func (store *stateDBWorkingSetStore) CaptureWriteQueue() []WriteQueueEntry {
 	return entries
 }
 
-// WriteQueueEntry is a captured state mutation from the write queue. Fork-only
-// type for ioSwarm SetDiffCallback consumers.
+// WriteQueueEntry is a captured state mutation from the write queue.
 type WriteQueueEntry struct {
 	WriteType uint8 // 0=Put, 1=Delete
 	Namespace string

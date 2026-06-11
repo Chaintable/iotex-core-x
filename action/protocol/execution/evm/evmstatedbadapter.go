@@ -680,6 +680,23 @@ func (stateDB *StateDBAdapter) SlotInAccessList(addr common.Address, slot common
 	return stateDB.accessList.Contains(addr, slot)
 }
 
+// AccessedSlots returns all storage slots accessed during EVM execution.
+// Returns a map of contract address → list of accessed slot hashes.
+func (stateDB *StateDBAdapter) AccessedSlots() map[common.Address][]common.Hash {
+	result := make(map[common.Address][]common.Hash)
+	if stateDB.accessList == nil {
+		return result
+	}
+	for addr, idx := range stateDB.accessList.addresses {
+		if idx >= 0 && idx < len(stateDB.accessList.slots) {
+			for slot := range stateDB.accessList.slots[idx] {
+				result[addr] = append(result[addr], slot)
+			}
+		}
+	}
+	return result
+}
+
 // AddAddressToAccessList adds the given address to the access list. This operation is safe to perform
 // even if the feature/fork is not active yet
 func (stateDB *StateDBAdapter) AddAddressToAccessList(addr common.Address) {
@@ -896,25 +913,6 @@ func (stateDB *StateDBAdapter) Snapshot() int {
 	return sn
 }
 
-// AccessedSlots returns all storage slots accessed during EVM execution.
-// Returns a map of contract address → list of accessed slot hashes. Used by
-// the ioswarm coordinator (SimulateAndCollectAccessList) to discover which
-// storage slots need to be prefetched for L3/L4 agents.
-func (stateDB *StateDBAdapter) AccessedSlots() map[common.Address][]common.Hash {
-	result := make(map[common.Address][]common.Hash)
-	if stateDB.accessList == nil {
-		return result
-	}
-	for addr, idx := range stateDB.accessList.addresses {
-		if idx >= 0 && idx < len(stateDB.accessList.slots) {
-			for slot := range stateDB.accessList.slots[idx] {
-				result[addr] = append(result[addr], slot)
-			}
-		}
-	}
-	return result
-}
-
 // AddLog adds log whose transaction amount is larger than 0
 func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
 	// Fork hook: forward to pipeline OnLog so the iotexRPCTracer can stamp the log into
@@ -934,7 +932,7 @@ func (stateDB *StateDBAdapter) AddLog(evmLog *types.Log) {
 		copy(topic[:], evmTopic.Bytes())
 		topics = append(topics, topic)
 	}
-	if topics[0] == _inContractTransfer {
+	if len(topics) > 0 && topics[0] == _inContractTransfer {
 		if len(topics) != 3 {
 			log.T(stateDB.ctx).Panic("Invalid in contract transfer topics")
 		}

@@ -86,8 +86,8 @@ type (
 		txValidator            *protocol.GenericValidator
 		receipts               []*action.Receipt
 		stateDiffCollector     *protocol.PipelineStateDiffCollector
-		stateDiffEntries       []WriteQueueEntry // captured write queue for state diff broadcasting (v2.3.8 ioSwarm)
-		stateDiffDigest        []byte            // cached digest bytes for state diff callback (v2.3.8 ioSwarm)
+		stateDiffEntries       []WriteQueueEntry // captured write queue for state diff broadcasting
+		stateDiffDigest        []byte            // cached digest bytes for state diff callback
 	}
 )
 
