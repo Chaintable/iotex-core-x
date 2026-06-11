@@ -7,6 +7,8 @@
 
 ## 1. Release 更新内容与升级决策
 
+**结论：升级。官方对所有节点类型标注 recommended，api/archive 节点（我们的形态）标注 as soon as possible。** 内容上：修复 3 个 HIGH 级 peer 可达攻击向量（直接命中我们节点的暴露面）和两个我们部署形态实际会踩的稳定性问题（mint panic 崩进程、api 节点 premint 报错）；无硬分叉、无 genesis/config 变化，纯二进制替换，升级窗口宽松。
+
 upstream [v2.4.2](https://github.com/iotexproject/iotex-core/releases/tag/v2.4.2)（2026-06-10 发布）是安全+稳定性 patch：
 
 - **#4844 安全加固**：修复安全审计认定的 3 个 HIGH 级 peer 可达攻击向量——任意 peer 可用 `Info=nil` 的 NODE_INFO 消息崩节点、actsync 出站流量洪泛、admin 端口未鉴权 POST `/pause` 可停块——外加一组 peer 输入可达的 panic 路径加固（`envelope.LoadProto` / `ExtractRevertMessage` / `AddLog` 空 topics / endorsement nil proto）。admin mux 改绑 `127.0.0.1`。
@@ -15,24 +17,17 @@ upstream [v2.4.2](https://github.com/iotexproject/iotex-core/releases/tag/v2.4.2
 - **#4816 / #4817**：收编本 fork 先行开发的 hot producer-keys（收编版加了 token 鉴权，fails closed）与 ioswarm coordinator（默认 `enabled: false`）。
 - `iotex-proto` → v0.6.6。
 
-**为什么升级**：3 个 HIGH peer 可达向量直接命中我们的暴露面（writer/api 节点都在公开 p2p 网络里，任何 peer 可发 NODE_INFO 崩我们的节点）；#4840 崩进程、#4839 premint 报错都是我们形态实际会踩的。upstream 标注全节点类型 recommended、api/archive 节点 as soon as possible。
+**为什么升级**：官方升级优先级表对 Delegate / Fullnode / API / Archive 全部标 **recommended**，且 release note 明确 api/gateway 节点与踩到 mint panic 的节点应 **as soon as possible**；3 个 HIGH peer 可达向量直接命中我们的暴露面（writer/api 节点都在公开 p2p 网络里，任何 peer 可发 NODE_INFO 崩我们的节点）；#4840 崩进程、#4839 premint 报错都是我们形态实际会踩的。
 
 **为什么可以不升级（反方论证）**：无硬分叉、无 genesis/config schema 变化、无新激活高度——不升级不会掉链、不会拒块；新功能（producer-keys 热轮换、ioswarm）我们都不使用。即：没有硬性时间点，纯收益驱动。
 
-**结论**：升级。安全修复收益明确，升级窗口宽松（纯二进制替换）。
-
 ## 2. Merge 冲突与影响面
 
-**冲突规模**：34 个 git 冲突 + 1 个 git 看不见的编译级冲突。实际决策点 2 个（见下）。
+**冲突规模**：34 个 git 冲突 + 1 个 git 看不见的编译级冲突，**无决策点**。
 
-- **26 个 add/add**：全部是 fork 先行功能被 upstream 收编产生的同源对账（`ioswarm/` ×24、`admin_producer_keys.go`、`snapshotexporter/snapshot.go`）。**全取 upstream 收编版**——差异主体是 gofmt 格式化噪音 + upstream 的改进（producer-keys 端点 +97 行鉴权加固；codec 保留了 fork 的 `ioswarm-json` 名并导出化）。
-- **8 个 content**：按 patch 归属处理——保留 fork 的 `ErigonDB()` accessor（canonical state-diff 查询）和 `stateDiffCollector` 字段；producer-keys/coordinator 重叠的 5 个文件取 upstream；`evm.go` 取 upstream（`AccessedSlots()` 提升进 `stateDB` 接口，fork 的 Erigon 包装类型靠嵌入提升自动满足，原类型断言 switch 等价废弃）。
-- **1 个编译级**：`StateDBAdapter.AccessedSlots` 两边加在同文件不同位置，git 自动合并无冲突、Go 重复声明编译错；两份实现逐字相同，删 fork 份。
-
-**决策点**（均已裁定）：
-
-1. **ioswarm fork 后续增量弃用**（`40676b838`：32MB gRPC 消息上限、nonce-race shadow 排除、per-agent rewards API——upstream 收编时未带）：与 upstream release 保持一致，弃用。依据：ioswarm 默认关闭、不在 debank 镜像执行路径；保留私有版会成为后续每次 merge 的永久冲突源；git 历史可随时 cherry-pick 找回。**2026-06-11 用户确认。**
-2. **fork 私有 dynamicFields 日志机制整套删除**（`SetDynamicFields`/`dynamicFieldsCore` + 测试）：upstream 收编 producer-keys 时改用轮换时显式日志行的方案；grep 全仓该机制仅 ioAddr 注入一处使用，无 debank 功能依赖。
+- **26 个 add/add**：全部是 fork 先行功能被 upstream 收编产生的同源对账（`ioswarm/` ×24、`admin_producer_keys.go`、`snapshotexporter/snapshot.go`），全取 upstream 收编版（含 fork 在收编快照之后的残留增量与被 #4816 review 删除的 dynamicFields 日志机制，一并对齐移除）。
+- **8 个 content**：**保留两处 fork patch**——`statedb.go` 的 `ErigonDB()` accessor 与 `workingset.go` 的 `stateDiffCollector` 字段（canonical state-diff / trace_debankBlock 采集依赖）；其余取 upstream。
+- **1 个编译级**：`StateDBAdapter.AccessedSlots` 两边加在同文件不同位置，git 自动合并无冲突、Go 重复声明编译错；两份实现逐字相同，删一份。
 
 **正向影响（upstream 改动 → pipeline 采集）**：
 
@@ -115,9 +110,9 @@ networks:
 | 49,000,000–49,000,019（追块段） | 20 | 20/20 MATCH |
 | 49,066,480–49,066,499（近 head 新块段） | 20 | 20/20 MATCH |
 
+**`trace_debankBlock` 对比（etl 模式链的生产投递路径，必测项）**：测试节点（v2.4.2）与生产 writer（v2.4.1，port-forward）同块调用对比，抽 3 块（近 head 非空块 ×2 + hash 已验证段 ×1）。剔除 `process_start_timestamp`（节点本地处理时刻）后**输出逐字节一致**（header / state_diff / validation_hash）。结论：生产投递路径的输出语义未变。对比过程已脚本化，可复跑。
+
 ## 5. 过程中暴露的其他问题
 
 1. **release workflow 镜像仓库名不一致**：`release.debank.yml` 原 IMAGE=`blockchain-iotex`，与 PR 构建（`build.debank.yml`）的 `blockchain/iotex-x` 不同仓库。本 PR 已统一为 `blockchain/iotex-x`（commit `9689e6d24`）。**生产升级注意**：现网 sts 仍跑旧仓库 `blockchain-iotex:amd64-v2.4.1-debank-1`，bump 到 v2.4.2-debank-1 时 image repository 必须一并切换。
 2. **baseline 测试失败**（见第 4 节）：`blockchain/blockdao` 数个 + `api/TestEstimateExecutionGasConsumption` 在 v2.4.1 工作线上即失败，建议后续单独修复或跟进 upstream。
-3. **镜像 ENTRYPOINT 与 compose 语义**：本镜像带 `ENTRYPOINT ["/usr/local/bin/iotex-server"]`，compose 渲染必须用 `entrypoint:` 而非 `command:`（后者是 CMD 不覆盖 ENTRYPOINT，会导致 argv 重复、全部 flags 被丢、config 走默认路径 fatal）。已固化进流程文档。
-4. **EBS 快照 lazy restore**（基础设施，非本仓库问题）：1TiB 快照卷未预热时同步仅 0.04 blk/s（"Queue is full" 刷屏），dd 全盘预读 + 临时调高卷 IOPS 后恢复正常。记录给后续大卷链测试参考。
