@@ -16,7 +16,7 @@ jobs:
   build-artifacts:
     strategy:
       matrix:
-        arch: [amd64]
+        arch: [amd64, arm64]
     runs-on: [self-hosted, "${{ matrix.arch }}"]
     permissions:
       contents: read
@@ -58,3 +58,31 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.arch }}-${{ env.REVISION }}
           build-args: ACCESS_TOKEN=${{ steps.generate-token.outputs.token }}
           provenance: false
+
+  merge-docker-manifest:
+    runs-on: [self-hosted, general]
+    needs: build-artifacts
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Set env
+        run: |
+          echo "REVISION=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+      - name: Merge manifest
+        run: |
+          docker buildx imagetools create --tag ${REGISTRY}/${IMAGE}:${REVISION} ${REGISTRY}/${IMAGE}:amd64-${REVISION} ${REGISTRY}/${IMAGE}:arm64-${REVISION}
