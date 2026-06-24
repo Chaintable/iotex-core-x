@@ -1,10 +1,6 @@
 # builder image
 FROM golang:1.24-bookworm as builder
 
-ARG ACCESS_TOKEN=""
-
-RUN if [ -n "$ACCESS_TOKEN" ]; then git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"; fi
-
 WORKDIR /iotex-core
 
 COPY go.mod go.sum ./
