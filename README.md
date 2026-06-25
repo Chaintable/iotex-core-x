@@ -1,13 +1,31 @@
+# Chaintable write node
+
+> Fork of [iotexproject/iotex-core](https://github.com/iotexproject/iotex-core), with Chaintable pipeline patches.
+
+## Architecture
+
+This repo runs the chain's execution layer with the [Chaintable pipeline](https://github.com/Chaintable/pipeline) tracer embedded. The tracer extracts block data — block headers, transactions, call traces, receipts, events, and state diffs — and ships it to **S3 + Kafka** (see pipeline's [architecture](https://github.com/Chaintable/pipeline/blob/main/docs/architecture.md)). Two consumption paths:
+
+- **Block headers + state diffs** → Kafka + S3 → [leafage-evm](https://github.com/Chaintable/leafage-evm): a lightweight EVM executor serving state queries (`eth_call`, `eth_estimateGas`, …), no P2P sync, no tx storage (see its [architecture](https://github.com/Chaintable/leafage-evm#architecture)).
+- **Block files** (transactions · call traces · receipts · events) → S3 → Chaintable's transaction/trace indexing pipeline.
+
+```
+Chaintable write node (this repo · producer, embeds pipeline tracer)
+        │
+        ├─ block headers + state diffs ──────────────────→ Kafka + S3 ─→ leafage-evm (EVM state queries)
+        │
+        └─ block files (tx · trace · receipts · events) ──→ S3 ─→ Chaintable indexing pipeline (tx/trace data)
+```
+
+---
+
 # iotex-core 
  
 Official Golang implementation of the IoTeX protocol, the modular DePIN Layer-1 network.
 
 [![Join the forum](https://img.shields.io/badge/Discuss-IoTeX%20Community-blue)](https://community.iotex.io/c/research-development/protocol)
 [![Go version](https://img.shields.io/badge/go-1.18.5-blue.svg)](https://github.com/moovweb/gvm)
-[![Go Report Card](https://goreportcard.com/badge/github.com/iotexproject/iotex-core)](https://goreportcard.com/report/github.com/iotexproject/iotex-core)
-[![Coverage](https://codecov.io/gh/iotexproject/iotex-core/branch/master/graph/badge.svg)](https://codecov.io/gh/iotexproject/iotex-core)
-[![Godoc](http://img.shields.io/badge/go-documentation-blue.svg?style=flat-square)](https://godoc.org/github.com/iotexproject/iotex-core)
-[![Releases](https://img.shields.io/github/release/iotexproject/iotex-core/all.svg?style=flat-square)](https://github.com/iotexproject/iotex-core/releases)
+[![Releases](https://img.shields.io/github/release/Chaintable/iotex-core-x/all.svg?style=flat-square)](https://github.com/Chaintable/iotex-core-x/releases)
 [![LICENSE](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 <a href="https://iotex.io/"><img src="logo/IoTeX.png" height="200px"/></a>
@@ -45,8 +63,8 @@ Please visit [IoTeX Delegate Manual](https://github.com/iotexproject/iotex-boots
 
 Download the code to your desired local location (doesn't have to be under `$GOPATH/src`)
 ```
-git clone git@github.com:iotexproject/iotex-core.git
-cd iotex-core
+git clone https://github.com/Chaintable/iotex-core-x
+cd iotex-core-x
 ```
 
 If you put the project code under your `$GOPATH\src`, you will need to set up an environment variable
