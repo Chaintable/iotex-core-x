@@ -48,6 +48,8 @@ github.com/Chaintable/go-ethereum-iotex v0.0.0-20260114032628-a8ad6229e289 h1:QM
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260114032628-a8ad6229e289/go.mod h1:jwOeu6lAFPwW5ewmovizj6w5Zn+VKbySwTSkj5eoEGU=
 github.com/Chaintable/pipeline v0.0.65-iotex-v2.4.1-debank-1.0.20260527164530-e05340662bb2 h1:XXBNZaXa/sDWZhDTVGe8rTvqPqGpQOWI7LHLt32BSnY=
 github.com/Chaintable/pipeline v0.0.65-iotex-v2.4.1-debank-1.0.20260527164530-e05340662bb2/go.mod h1:q/RTAn31zcH1tHaxAuuUGrgCWmMvp2zL72L1ZYgkrXI=
+github.com/Chaintable/pipeline v0.0.65-iotex-v2.4.1-debank-2.0.20260812075158-691c18f815ef h1:0XBKWPj4Ax5MvfQ4ru25x3Di50tHBHFyXzbcEnuQ/Xk=
+github.com/Chaintable/pipeline v0.0.65-iotex-v2.4.1-debank-2.0.20260812075158-691c18f815ef/go.mod h1:q/RTAn31zcH1tHaxAuuUGrgCWmMvp2zL72L1ZYgkrXI=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/DataDog/zstd v1.4.5 h1:EndNeuB0l9syBZhut0wns3gV1hL8zX8LIu6ZiVHWLIQ=
 github.com/DataDog/zstd v1.4.5/go.mod h1:1jcaCB/ufaK+sKp1NBhlGmpz41jOoPQ35bpF36t7BBo=
