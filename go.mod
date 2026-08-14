@@ -4,7 +4,7 @@ go 1.24.6
 
 require (
 	dario.cat/mergo v1.0.2
-	github.com/Chaintable/pipeline v0.0.69-0.20260814030650-bf2130838186
+	github.com/Chaintable/pipeline v0.0.69-iotex-v2.4.2-debank-1
 	github.com/agiledragon/gomonkey/v2 v2.13.0
 	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/cenkalti/backoff v2.2.1+incompatible
