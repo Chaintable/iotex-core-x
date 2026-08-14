@@ -46,8 +46,8 @@ github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260114032628-a8ad6229e289 h1:QMVGJ8wAtfPwKH0duh8peogyMQblA4KNMi3/Qno95r4=
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260114032628-a8ad6229e289/go.mod h1:jwOeu6lAFPwW5ewmovizj6w5Zn+VKbySwTSkj5eoEGU=
-github.com/Chaintable/pipeline v0.0.65-iotex-v2.4.1-debank-1.0.20260527164530-e05340662bb2 h1:XXBNZaXa/sDWZhDTVGe8rTvqPqGpQOWI7LHLt32BSnY=
-github.com/Chaintable/pipeline v0.0.65-iotex-v2.4.1-debank-1.0.20260527164530-e05340662bb2/go.mod h1:q/RTAn31zcH1tHaxAuuUGrgCWmMvp2zL72L1ZYgkrXI=
+github.com/Chaintable/pipeline v0.0.69-iotex-v2.4.2-debank-1 h1:x4EEyWe/9ijNgWWAVyVnIt71/oZysWwN72fx7sQPY3c=
+github.com/Chaintable/pipeline v0.0.69-iotex-v2.4.2-debank-1/go.mod h1:q/RTAn31zcH1tHaxAuuUGrgCWmMvp2zL72L1ZYgkrXI=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/DataDog/zstd v1.4.5 h1:EndNeuB0l9syBZhut0wns3gV1hL8zX8LIu6ZiVHWLIQ=
 github.com/DataDog/zstd v1.4.5/go.mod h1:1jcaCB/ufaK+sKp1NBhlGmpz41jOoPQ35bpF36t7BBo=
