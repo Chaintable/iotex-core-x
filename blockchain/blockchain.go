@@ -793,7 +793,7 @@ func (bc *blockchain) pushBlockChange(blk *block.Block) {
 		}
 	}
 	if blockChange != nil {
-		if err := tracer.NodeXPusher.PushBlockChangeNotification(blockChange); err != nil {
+		if err := tracer.NodeXPusher.PushBlockChangeNotification(blockChange, nil); err != nil {
 			log.L().Error("PushBlockChangeNotification error", zap.Error(err))
 		} else {
 			log.L().Info("NodeXPusher PushBlockChangeNotification", zap.Uint64("height", blk.Height()))
