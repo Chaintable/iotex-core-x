@@ -52,12 +52,6 @@ github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260210121649-5e2059cfbb3a h1:/3ntEELhJ1dmYs3rMzx8SsW/7fYNPyj5tmsevW/PmDI=
 github.com/Chaintable/go-ethereum-iotex v0.0.0-20260210121649-5e2059cfbb3a/go.mod h1:G6hio43rLWAF8Ao6tOUJsKKcsW0IBpCNbmNuaO5B5ro=
-github.com/Chaintable/pipeline v0.0.64-0.20260302065725-712e3daf8476 h1:iSiuduhSGjqNkCVSPwgHyfoGaANbKl6SI6Zg1En2KmE=
-github.com/Chaintable/pipeline v0.0.64-0.20260302065725-712e3daf8476/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
-github.com/Chaintable/pipeline v0.0.64-0.20260413142006-97f0506d87c2 h1:vVZpMDPIRu67d5zKO7sZgKcJanyBoo/gHdGtPcIuERk=
-github.com/Chaintable/pipeline v0.0.64-0.20260413142006-97f0506d87c2/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
-github.com/Chaintable/pipeline v0.0.64-0.20260413162337-9fb92e7be04e h1:sSZ0rwNd0uvaAMd5cI2gvRk1/8dZBwTNfpvzXLnfgDk=
-github.com/Chaintable/pipeline v0.0.64-0.20260413162337-9fb92e7be04e/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
 github.com/Chaintable/pipeline v0.0.64-0.20260519153328-3a4dfd6284bc h1:9AEbQYNDRejpbHY+ZCvLA6pQ6QJ2s2gzaZMHcvYRsbc=
 github.com/Chaintable/pipeline v0.0.64-0.20260519153328-3a4dfd6284bc/go.mod h1:67YNTCmGPaCopOkZZvqLLAZERYdjtmpbwa7PSp7liIY=
 github.com/CloudyKit/fastprinter v0.0.0-20170127035650-74b38d55f37a/go.mod h1:EFZQ978U7x8IRnstaskI3IysnWY5Ao3QgZUKOXlsAdw=
@@ -773,8 +767,8 @@ github.com/kkdai/bstream v0.0.0-20161212061736-f391b8402d23/go.mod h1:J+Gs4SYgM6
 github.com/klauspost/compress v1.8.2/go.mod h1:RyIbtBH6LamlWaDj8nUwkbUhJ87Yi3uG0guNDohfE1A=
 github.com/klauspost/compress v1.9.0/go.mod h1:RyIbtBH6LamlWaDj8nUwkbUhJ87Yi3uG0guNDohfE1A=
 github.com/klauspost/compress v1.15.9/go.mod h1:PhcZ0MbTNciWF3rruxRgKxI5NkcHHrHUDtV4Yw2GlzU=
-github.com/klauspost/compress v1.17.11 h1:In6xLpyWOi1+C7tXUUWv2ot1QvBjxevKAaI6IXrJmUc=
-github.com/klauspost/compress v1.17.11/go.mod h1:pMDklpSncoRMuLFrf1W9Ss9KT+0rH90U12bZKk7uwG0=
+github.com/klauspost/compress v1.18.7 h1:aUyZsS4kH3QTKurYhAOwAHxllVPnOthb3vPfnF1Ehjw=
+github.com/klauspost/compress v1.18.7/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/klauspost/cpuid v1.2.1/go.mod h1:Pj4uuM528wm8OyEC2QMXAi2YiTZ96dNQPGgoMS4s3ek=
 github.com/klauspost/cpuid/v2 v2.2.9 h1:66ze0taIn2H33fBvCkXuv9BmCwDfafmiIVpKV9kKGuY=
 github.com/klauspost/cpuid/v2 v2.2.9/go.mod h1:rqkxqrZ1EhYM9G+hXH7YdowN5R5RGN6NK4QwQ3WMXF8=
